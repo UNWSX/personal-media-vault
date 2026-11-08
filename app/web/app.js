@@ -1453,7 +1453,7 @@
       await flushComment();
       if (saveQueues.has(it.path)) await saveQueues.get(it.path);
       const name = cleanTitle(it.title);
-      if (!confirm(`确定删除「${name}」？\n\n文件会被移到 .media-app\\trash\\，需要时可以手动恢复。`)) return;
+      if (!confirm(`确定删除「${name}」？\n\n笔记和未被其他条目共享的主封面会被移到 .media-app\\trash\\，需要时可以手动恢复。`)) return;
       del.disabled = true;
       try {
         const data = await apiJSON("/api/delete", {
@@ -1464,7 +1464,12 @@
         closeDrawer(false);
         ITEMS = ITEMS.filter((x) => x.path !== it.path);
         sync();
-        toast("已删除：" + name);
+        const coverText = data.attachmentMoved
+          ? "，封面也已回收"
+          : data.attachmentShared
+            ? "，共享封面已保留"
+            : "";
+        toast("已删除：" + name + coverText);
       } catch (e) {
         del.disabled = false;
         toast("删除失败：" + e.message);

@@ -449,6 +449,53 @@ class PhaseOneSafetyTests(unittest.TestCase):
             lib.delete("attachments/not-a-note.md", None)
         self.assertTrue(attachment.exists())
 
+    def test_delete_recycles_unshared_local_cover(self):
+        cover = self.vault / "attachments" / "unique-cover.png"
+        cover.write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 2000)
+        note = self.media / "with-cover.md"
+        note.write_text(
+            "---\n"
+            "title: With Cover\n"
+            "type: movie\n"
+            "image: attachments/unique-cover.png\n"
+            "status: false\n"
+            "---\n",
+            encoding="utf-8",
+        )
+        lib = server.Library(self.vault)
+        result = lib.delete_with_details(
+            "02-电影阅读/movie/with-cover.md",
+            storage_safety.content_revision(note.read_bytes()),
+        )
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["attachmentMoved"])
+        self.assertFalse(result["attachmentShared"])
+        self.assertFalse(note.exists())
+        self.assertFalse(cover.exists())
+        self.assertTrue(any((self.vault / ".media-app" / "trash").glob("*with-cover.md")))
+        self.assertTrue(any((self.vault / ".media-app" / "trash").glob("*_attachment_unique-cover.png")))
+
+    def test_delete_keeps_shared_local_cover(self):
+        cover = self.vault / "attachments" / "shared-cover.png"
+        cover.write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 2000)
+        for name in ("first.md", "second.md"):
+            (self.media / name).write_text(
+                "---\n"
+                f"title: {name}\n"
+                "type: movie\n"
+                "image: attachments/shared-cover.png\n"
+                "status: false\n"
+                "---\n",
+                encoding="utf-8",
+            )
+        lib = server.Library(self.vault)
+        result = lib.delete_with_details("02-电影阅读/movie/first.md")
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["attachmentShared"])
+        self.assertFalse(result["attachmentMoved"])
+        self.assertTrue(cover.exists())
+        self.assertTrue((self.media / "second.md").exists())
+
     def test_dotdot_is_rejected_in_notes_and_attachments(self):
         note = self.write_note()
         lib = server.Library(self.vault)

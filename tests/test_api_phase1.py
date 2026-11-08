@@ -390,6 +390,9 @@ class PhaseOneApiTests(unittest.TestCase):
         })
         self.assertEqual(status, 200)
         self.assertTrue(deleted["ok"])
+        self.assertFalse(deleted["attachmentMoved"])
+        self.assertFalse(deleted["attachmentShared"])
+        self.assertTrue(deleted["trash"])
         self.assertFalse(created_path.exists())
         self.assertTrue(any((self.vault / ".media-app" / "trash").glob("*新建测试.md")))
 

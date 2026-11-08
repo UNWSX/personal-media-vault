@@ -745,26 +745,111 @@ class Library:
                 "revision": content_revision(raw),
             })
 
-    def delete(self, rel: str, expected_revision=None) -> bool:
-        """删除笔记：移到 .media-app/trash/，不直接物理删除。"""
+    def _attachment_referenced_elsewhere(
+        self,
+        target: Path,
+        image_rel: str,
+        attachment: Path,
+    ) -> bool:
+        normalized = image_rel.replace("\\", "/").lstrip("/")
+        needles = {
+            normalized.lower().encode("utf-8"),
+            normalized.replace("/", "\\").lower().encode("utf-8"),
+            attachment.name.lower().encode("utf-8"),
+        }
+        target_resolved = target.resolve()
+        for note in self.media_root.rglob("*.md"):
+            try:
+                if note.resolve() == target_resolved:
+                    continue
+                raw = note.read_bytes().lower()
+            except OSError:
+                # If a note cannot be inspected, retain the shared attachment.
+                return True
+            if any(needle in raw for needle in needles if needle):
+                return True
+        return False
+
+    def delete_with_details(self, rel: str, expected_revision=None) -> dict:
+        """Move a note and its unshared local cover into trash."""
         rel = normalize_vault_relative_path(rel)
         with self._path_lock(rel):
             target = self._note_target(rel)
             if not target.is_file():
-                return False
+                return {"ok": False, "path": rel}
             self._check_revision(target, rel, expected_revision)
+
+            note = read_note(target, self.vault) or {}
+            image_value = str(note.get("image") or "").strip()
+            attachment = None
+            attachment_rel = ""
+            attachment_shared = False
+            if image_value and not image_value.startswith(("http://", "https://")):
+                try:
+                    attachment = self.resolve_attachment(image_value)
+                    attachment_rel = image_value.replace("\\", "/")
+                    if attachment.is_file():
+                        attachment_shared = self._attachment_referenced_elsewhere(
+                            target,
+                            attachment_rel,
+                            attachment,
+                        )
+                    else:
+                        attachment = None
+                except (OSError, ValueError):
+                    attachment = None
+
             trash = self.data_dir / "trash"
             trash.mkdir(parents=True, exist_ok=True)
             stamp = "%s-%06d" % (time.strftime("%Y%m%d-%H%M%S"), int(time.time_ns() % 1_000_000))
             dest = trash / ("%s_%s" % (stamp, target.name))
+            attachment_dest = (
+                trash / ("%s_attachment_%s" % (stamp, attachment.name))
+                if attachment is not None and not attachment_shared
+                else None
+            )
             n = 2
-            while dest.exists():
+            while dest.exists() or (
+                attachment_dest is not None and attachment_dest.exists()
+            ):
                 dest = trash / ("%s_%d_%s" % (stamp, n, target.name))
+                if attachment is not None and not attachment_shared:
+                    attachment_dest = trash / (
+                        "%s_%d_attachment_%s" % (stamp, n, attachment.name)
+                    )
                 n += 1
             os.replace(target, dest)
             self._cache_item(rel, None)
-            self.log.event("markdown_deleted", path=rel, trash=dest.name)
-            return True
+
+            attachment_moved = False
+            if attachment is not None and not attachment_shared and attachment_dest is not None:
+                try:
+                    os.replace(attachment, attachment_dest)
+                    attachment_moved = True
+                except OSError:
+                    # The note remains safely recoverable even if the cover
+                    # could not be moved and therefore stays in attachments.
+                    attachment_dest = None
+
+            self.log.event(
+                "markdown_deleted",
+                path=rel,
+                trash=dest.name,
+                attachment=attachment_dest.name if attachment_dest else None,
+                attachmentShared=attachment_shared,
+            )
+            return {
+                "ok": True,
+                "path": rel,
+                "trash": dest.name,
+                "attachment": attachment_rel or None,
+                "attachmentMoved": attachment_moved,
+                "attachmentShared": attachment_shared,
+            }
+
+    def delete(self, rel: str, expected_revision=None) -> bool:
+        """Backward-compatible boolean delete wrapper."""
+        return bool(self.delete_with_details(rel, expected_revision).get("ok"))
 
     def update(self, rel: str, payload: dict) -> dict | None:
         self.load_if_changed()
@@ -4712,8 +4797,15 @@ class Handler(BaseHTTPRequestHandler):
                 revision = payload.get("revision")
                 if revision is not None and not isinstance(revision, str):
                     return self._error("revision 必须是字符串", 400)
-                done = LIB.delete(rel, expected_revision=revision)
-                return self._json({"ok": bool(done), "deleted": rel if done else None})
+                result = LIB.delete_with_details(rel, expected_revision=revision)
+                return self._json({
+                    "ok": bool(result.get("ok")),
+                    "deleted": rel if result.get("ok") else None,
+                    "trash": result.get("trash"),
+                    "attachment": result.get("attachment"),
+                    "attachmentMoved": bool(result.get("attachmentMoved")),
+                    "attachmentShared": bool(result.get("attachmentShared")),
+                })
 
             if parsed.path == "/api/quit":
                 LIB.log.event("app_stopping", source="shell")
