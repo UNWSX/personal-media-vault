@@ -2,6 +2,7 @@ using System;
 using System.Diagnostics;
 using System.IO;
 using System.Net;
+using System.Net.Sockets;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Forms;
@@ -34,13 +35,26 @@ namespace MediaVaultWebLauncher
             }
 
             int port = FindRunning(dataDir);
+            Process serviceProcess = null;
             if (port == 0)
             {
+                port = FindAvailablePort();
+                if (port == 0)
+                {
+                    MessageBox.Show(
+                        "本地服务端口 8765–8774 均被占用，无法启动网页版。",
+                        "影音库网页版",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Error
+                    );
+                    return;
+                }
+
                 try
                 {
-                    Process.Start(new ProcessStartInfo(service)
+                    serviceProcess = Process.Start(new ProcessStartInfo(service)
                     {
-                        Arguments = "--port " + PortStart
+                        Arguments = "--port " + port + " --no-browser"
                             + " --vault \"" + dataDir.Replace("\"", "") + "\"",
                         WorkingDirectory = appDir,
                         UseShellExecute = false,
@@ -58,18 +72,28 @@ namespace MediaVaultWebLauncher
                     return;
                 }
 
-                DateTime deadline = DateTime.UtcNow.AddSeconds(40);
+                DateTime deadline = DateTime.UtcNow.AddSeconds(90);
                 while (DateTime.UtcNow < deadline && port == 0)
                 {
-                    Thread.Sleep(250);
-                    port = FindRunning(dataDir);
+                    Thread.Sleep(300);
+                    if (serviceProcess != null && serviceProcess.HasExited)
+                    {
+                        break;
+                    }
+                    if (PingMatches(port, dataDir))
+                    {
+                        break;
+                    }
                 }
             }
 
-            if (port == 0)
+            if (!PingMatches(port, dataDir))
             {
+                string detail = serviceProcess != null && serviceProcess.HasExited
+                    ? "\n\n服务进程已退出，退出代码：" + serviceProcess.ExitCode
+                    : "\n\n首次启动通常需要几秒，请检查安全软件是否拦截了影音库服务。";
                 MessageBox.Show(
-                    "影音库服务没有及时启动。\n\n请查看程序目录是否完整，然后重试。",
+                    "影音库服务没有及时启动。" + detail,
                     "影音库网页版",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error
@@ -86,6 +110,31 @@ namespace MediaVaultWebLauncher
             {
                 UseShellExecute = true,
             });
+        }
+
+        private static int FindAvailablePort()
+        {
+            for (int port = PortStart; port < PortEnd; port++)
+            {
+                TcpListener listener = null;
+                try
+                {
+                    listener = new TcpListener(IPAddress.Loopback, port);
+                    listener.Start();
+                    return port;
+                }
+                catch
+                {
+                }
+                finally
+                {
+                    if (listener != null)
+                    {
+                        listener.Stop();
+                    }
+                }
+            }
+            return 0;
         }
 
         private static int FindRunning(string expectedVaultRoot)
@@ -128,6 +177,42 @@ namespace MediaVaultWebLauncher
                 }
             }
             return 0;
+        }
+
+        private static bool PingMatches(int port, string expectedVaultRoot)
+        {
+            try
+            {
+                using (WebClient client = new WebClient())
+                {
+                    client.Proxy = null;
+                    string raw = client.DownloadString(
+                        "http://127.0.0.1:" + port + "/api/ping"
+                    );
+                    Match app = Regex.Match(
+                        raw,
+                        "\"app\"\\s*:\\s*\"([^\"]+)\""
+                    );
+                    Match vault = Regex.Match(
+                        raw,
+                        "\"vaultRoot\"\\s*:\\s*\"((?:\\\\.|[^\"])*)\""
+                    );
+                    return app.Success
+                        && app.Groups[1].Value == AppId
+                        && vault.Success
+                        && string.Equals(
+                            Path.GetFullPath(
+                                JsonUnescape(vault.Groups[1].Value)
+                            ),
+                            expectedVaultRoot,
+                            StringComparison.OrdinalIgnoreCase
+                        );
+                }
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         private static string JsonUnescape(string value)
