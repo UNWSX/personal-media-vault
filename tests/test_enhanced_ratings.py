@@ -57,6 +57,29 @@ class BangumiAndAliasTests(unittest.TestCase):
         self.assertEqual(result["status"], "matched")
         self.assertEqual(result["score"], 8.1)
 
+    def test_bangumi_retries_transient_network_failure(self):
+        payload = {
+            "data": [{
+                "id": 118335,
+                "name": "進撃の巨人 Season 2",
+                "name_cn": "进击的巨人 第二季",
+                "date": "2017-04-01",
+                "rating": {"score": 8.1},
+            }]
+        }
+        with mock.patch.object(
+            server,
+            "_post_json_url",
+            side_effect=[OSError("temporary"), payload],
+        ), mock.patch.object(server.time, "sleep"):
+            result = server.lookup_bangumi(
+                "进击的巨人 第二季",
+                2017,
+                season=2,
+            )
+        self.assertEqual(result["status"], "matched")
+        self.assertEqual(result["score"], 8.1)
+
     def test_anilist_bridges_japanese_to_english(self):
         payload = {
             "data": {
@@ -81,6 +104,162 @@ class BangumiAndAliasTests(unittest.TestCase):
             )
         self.assertEqual(result["status"], "matched")
         self.assertIn("Attack on Titan Season 2", result["aliases"])
+
+    def test_anilist_retries_transient_network_failure(self):
+        payload = {
+            "data": {
+                "Page": {
+                    "media": [{
+                        "title": {
+                            "english": "Attack on Titan Season 2",
+                            "romaji": "Shingeki no Kyojin Season 2",
+                            "native": "進撃の巨人 Season 2",
+                        },
+                        "synonyms": ["进击的巨人 第二季"],
+                        "startDate": {"year": 2017},
+                    }]
+                }
+            }
+        }
+        with mock.patch.object(
+            server,
+            "_post_json_url",
+            side_effect=[OSError("temporary"), payload],
+        ), mock.patch.object(server.time, "sleep"):
+            result = server.lookup_anime_aliases(
+                "進撃の巨人 Season 2",
+                2017,
+                season=2,
+            )
+        self.assertEqual(result["status"], "matched")
+
+    def test_anime_alias_lookup_tries_original_title_after_first_miss(self):
+        with tempfile.TemporaryDirectory() as temp:
+            vault = Path(temp)
+            lib = server.Library(vault)
+            cache_state = {
+                "imdb": {},
+                "rotten": {},
+                "bangumi": {},
+                "anilist": {},
+                "wikidata": {},
+                "metacritic": {},
+            }
+            with (
+                mock.patch.object(
+                    batch,
+                    "_douban_title_candidate",
+                    return_value=("", ""),
+                ),
+                mock.patch.object(
+                    batch,
+                    "lookup_bangumi",
+                    return_value={
+                        "status": "matched",
+                        "score": 8.0,
+                        "candidate": {
+                            "originalTitle": "日本語タイトル Season 3",
+                        },
+                    },
+                ),
+                mock.patch.object(
+                    batch,
+                    "lookup_anime_aliases",
+                    side_effect=[
+                        {"status": "no_match", "aliases": []},
+                        {
+                            "status": "matched",
+                            "aliases": [
+                                "English Anime Title Season 3",
+                            ],
+                        },
+                    ],
+                ) as aliases,
+            ):
+                identity = batch._build_identity(
+                    {
+                        "type": "teleplay",
+                        "title": "中文动画标题",
+                        "year": 2026,
+                        "tags": ["动画"],
+                    },
+                    {"originalTitle": "日本語タイトル Season 3"},
+                    lib,
+                    None,
+                    cache_state,
+                    None,
+                    0,
+                    True,
+                    False,
+                    False,
+                    True,
+                    True,
+                )
+        self.assertGreaterEqual(aliases.call_count, 2)
+        self.assertIn(
+            (
+                "English Anime Title Season 3",
+                "anilist_alias",
+            ),
+            identity["queries"],
+        )
+
+    def test_verified_anime_series_overrides(self):
+        cases = {
+            "灵笼第二季": ("tt10827146", 2),
+            "雾山五行": ("tt12953630", 1),
+            "雾山五行·犀川幻紫林": ("tt12953630", 2),
+            "我的三体之章北海传": ("tt8829226", 3),
+            "我的三体之罗辑传": ("tt8829226", 2),
+            "鬼灭之刃：无限列车篇": ("tt9335498", 2),
+            "无职转生Ⅲ 到了异世界就拿出真本事": ("tt13293588", 3),
+        }
+        for title, (imdb_id, season) in cases.items():
+            with self.subTest(title=title):
+                override = batch.resolve_imdb_override(title)
+                self.assertIsNotNone(override)
+                self.assertEqual(override["imdbId"], imdb_id)
+                self.assertEqual(override["season"], season)
+
+    def test_imdb_season_accepts_year_inside_multi_year_run(self):
+        episodes = [{
+            "id": "tt1",
+            "season": 2,
+            "episode": number,
+            "year": year,
+            "rating": rating,
+        } for number, year, rating in (
+            (1, 2024, 9.0),
+            (2, 2025, 9.4),
+        )]
+        with mock.patch.object(
+            server,
+            "_imdb_series_episodes",
+            return_value=episodes,
+        ):
+            result = server._lookup_imdb_season_candidates(
+                [{"id": "tt10827146", "l": "Ling Cage", "qid": "tvSeries"}],
+                2,
+                2025,
+                {"tvseries"},
+            )
+        self.assertEqual(result["status"], "matched")
+        self.assertEqual(result["score"], 9.2)
+
+    def test_anime_detection_accepts_extended_tag_labels(self):
+        self.assertTrue(batch._is_anime({"tags": ["日本动画"]}))
+        self.assertTrue(batch._is_anime({"tags": ["TV Anime"]}))
+        self.assertEqual(
+            server._missing_external_fields({
+                "type": "teleplay",
+                "imdbScore": 8.0,
+                "rottenTomatoesScore": 90,
+                "metacriticScore": 80,
+                "bangumiScore": None,
+                "tags": ["日本动画"],
+            }),
+            ["bangumiScore"],
+        )
 
     def test_wikidata_resolves_stable_imdb_and_rt_ids(self):
         search = {"search": [{"id": "Q69082264", "label": "中国机长"}]}
@@ -405,16 +584,34 @@ class BangumiAndAliasTests(unittest.TestCase):
 
     def test_auto_ratings_use_the_same_results_as_batch_tool(self):
         cases = (
-            ("Part.1", "2023-07-02", 1, 7.6),
-            ("Part2", "2024-04-07", 2, 7.9),
+            (
+                "无职转生Ⅱ到了异世界就拿出真本事Part.1",
+                "2023-07-02",
+                2,
+                1,
+                7.6,
+            ),
+            (
+                "无职转生Ⅱ到了异世界就拿出真本事Part2",
+                "2024-04-07",
+                2,
+                2,
+                7.9,
+            ),
+            (
+                "无职转生Ⅲ 到了异世界就拿出真本事",
+                "2026-07-04",
+                3,
+                None,
+                7.9,
+            ),
         )
-        for suffix, date_published, expected_part, score in cases:
-            with self.subTest(suffix=suffix), tempfile.TemporaryDirectory() as temp:
+        for title, date_published, expected_season, expected_part, score in cases:
+            with self.subTest(title=title), tempfile.TemporaryDirectory() as temp:
                 vault = Path(temp)
                 (vault / "02-电影阅读" / "teleplay").mkdir(parents=True)
                 (vault / "attachments").mkdir()
                 lib = server.Library(vault)
-                title = "无职转生Ⅱ到了异世界就拿出真本事" + suffix
                 created = server.create_note(lib, {
                     "type": "teleplay",
                     "title": title,
@@ -477,8 +674,10 @@ class BangumiAndAliasTests(unittest.TestCase):
                     batch_plan["entries"][0]["updates"],
                 )
                 self.assertEqual(automatic, {"imdbScore": score})
-                kwargs = imdb_by_id.call_args.kwargs
-                self.assertEqual(kwargs["season"], 2)
+                args, kwargs = imdb_by_id.call_args
+                self.assertEqual(args[0], "tt13293588")
+                self.assertEqual(args[1], "teleplay")
+                self.assertEqual(kwargs["season"], expected_season)
                 self.assertEqual(kwargs["part"], expected_part)
 
     def test_worker_schedules_retry_when_sources_fail(self):

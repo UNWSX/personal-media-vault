@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Forms;
@@ -12,6 +13,8 @@ namespace MediaVaultWebLauncher
     internal static class Program
     {
         private const string AppId = "media-vault";
+        private const string ExpectedVersion = "2.5.18";
+        private const int ExpectedProtocolVersion = 1;
         private const int PortStart = 8765;
         private const int PortEnd = 8775;
 
@@ -81,7 +84,7 @@ namespace MediaVaultWebLauncher
                     {
                         break;
                     }
-                    ready = PingAvailable(port);
+                    ready = PingMatches(port, dataDir);
                 }
 
                 if (!ready)
@@ -99,7 +102,7 @@ namespace MediaVaultWebLauncher
                 }
             }
 
-            if (!PingAvailable(port))
+            if (!PingMatches(port, dataDir))
             {
                 string detail = serviceProcess != null && serviceProcess.HasExited
                     ? "\n\n服务进程已退出，退出代码：" + serviceProcess.ExitCode
@@ -122,26 +125,6 @@ namespace MediaVaultWebLauncher
             {
                 UseShellExecute = true,
             });
-        }
-
-        private static bool PingAvailable(int port)
-        {
-            try
-            {
-                using (WebClient client = new WebClient())
-                {
-                    client.Proxy = null;
-                    string raw = client.DownloadString(
-                        "http://127.0.0.1:" + port + "/api/ping"
-                    );
-                    return raw.Contains("\"app\":\"media-vault\"")
-                        || raw.Contains("\"app\": \"media-vault\"");
-                }
-            }
-            catch
-            {
-                return false;
-            }
         }
 
         private static int FindAvailablePort()
@@ -173,40 +156,7 @@ namespace MediaVaultWebLauncher
         {
             for (int port = PortStart; port < PortEnd; port++)
             {
-                try
-                {
-                    using (WebClient client = new WebClient())
-                    {
-                        client.Proxy = null;
-                        string raw = client.DownloadString(
-                            "http://127.0.0.1:" + port + "/api/ping"
-                        );
-                        Match app = Regex.Match(
-                            raw,
-                            "\"app\"\\s*:\\s*\"([^\"]+)\""
-                        );
-                        Match vault = Regex.Match(
-                            raw,
-                            "\"vaultRoot\"\\s*:\\s*\"((?:\\\\.|[^\"])*)\""
-                        );
-                        if (app.Success
-                            && app.Groups[1].Value == AppId
-                            && vault.Success
-                            && string.Equals(
-                            Path.GetFullPath(
-                                JsonUnescape(vault.Groups[1].Value)
-                            ),
-                            expectedVaultRoot,
-                            StringComparison.OrdinalIgnoreCase
-                        ))
-                        {
-                            return port;
-                        }
-                    }
-                }
-                catch
-                {
-                }
+                if (PingMatches(port, expectedVaultRoot)) return port;
             }
             return 0;
         }
@@ -218,6 +168,7 @@ namespace MediaVaultWebLauncher
                 using (WebClient client = new WebClient())
                 {
                     client.Proxy = null;
+                    client.Encoding = Encoding.UTF8;
                     string raw = client.DownloadString(
                         "http://127.0.0.1:" + port + "/api/ping"
                     );
@@ -225,12 +176,36 @@ namespace MediaVaultWebLauncher
                         raw,
                         "\"app\"\\s*:\\s*\"([^\"]+)\""
                     );
+                    Match version = Regex.Match(
+                        raw,
+                        "\"version\"\\s*:\\s*\"([^\"]+)\""
+                    );
+                    Match protocol = Regex.Match(
+                        raw,
+                        "\"protocolVersion\"\\s*:\\s*(\\d+)"
+                    );
+                    Match instance = Regex.Match(
+                        raw,
+                        "\"instanceId\"\\s*:\\s*\"([^\"]+)\""
+                    );
                     Match vault = Regex.Match(
                         raw,
                         "\"vaultRoot\"\\s*:\\s*\"((?:\\\\.|[^\"])*)\""
                     );
+                    Guid parsedInstance;
                     return app.Success
                         && app.Groups[1].Value == AppId
+                        && version.Success
+                        && version.Groups[1].Value == ExpectedVersion
+                        && protocol.Success
+                        && protocol.Groups[1].Value
+                            == ExpectedProtocolVersion.ToString()
+                        && instance.Success
+                        && Guid.TryParseExact(
+                            instance.Groups[1].Value,
+                            "N",
+                            out parsedInstance
+                        )
                         && vault.Success
                         && string.Equals(
                             Path.GetFullPath(

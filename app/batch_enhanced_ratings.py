@@ -51,8 +51,11 @@ def _now() -> str:
 
 
 def _is_anime(item: dict) -> bool:
-    tags = {str(tag).casefold() for tag in item.get("tags", [])}
-    return "动画" in tags or "动漫" in tags or "animation" in tags
+    tags = " ".join(str(tag).casefold() for tag in item.get("tags", []))
+    return any(
+        marker in tags
+        for marker in ("动画", "动漫", "anime", "アニメ")
+    )
 
 
 def _score_value(value) -> float | None:
@@ -395,31 +398,49 @@ def _build_identity(
             if fallback.get("status") == "matched":
                 bangumi = fallback
         candidate = bangumi.get("candidate") or {}
-        alias_source = candidate.get("originalTitle") or primary or item.get("title")
-        if alias_source and (need_imdb or need_rt or need_metacritic):
-            alias_query = (
-                extract_season(alias_source)["title"]
-                if season is not None
-                else alias_source
+        alias_sources = list(dict.fromkeys(
+            str(value or "").strip()
+            for value in (
+                fm.get("originalTitle"),
+                candidate.get("originalTitle"),
+                primary,
+                item.get("title"),
             )
-            alias_key = "%s|%s|%s" % (
-                alias_query,
-                item.get("year") or "",
-                "",
-            )
-            anime = cache_state["anilist"].get(alias_key)
-            if not isinstance(anime, dict):
-                anime = lookup_anime_aliases(
-                    alias_query,
-                    item.get("year"),
-                    None,
-                    proxy=proxy,
+            if str(value or "").strip()
+        ))
+        anime = None
+        if need_imdb or need_rt or need_metacritic:
+            for alias_source in alias_sources:
+                alias_query = (
+                    extract_season(alias_source)["title"]
+                    if season is not None
+                    else alias_source
                 )
-                cache_state["anilist"][alias_key] = anime
-                if cache_path is not None:
-                    _write_json(cache_path, {"cacheFormatVersion": 1, **cache_state})
-                if wait_seconds > 0:
-                    time.sleep(wait_seconds)
+                alias_key = "%s|%s|%s" % (
+                    alias_query,
+                    item.get("year") or "",
+                    "",
+                )
+                current_anime = cache_state["anilist"].get(alias_key)
+                if not isinstance(current_anime, dict):
+                    current_anime = lookup_anime_aliases(
+                        alias_query,
+                        item.get("year"),
+                        None,
+                        proxy=proxy,
+                    )
+                    cache_state["anilist"][alias_key] = current_anime
+                    if cache_path is not None:
+                        _write_json(
+                            cache_path,
+                            {"cacheFormatVersion": 1, **cache_state},
+                        )
+                    if wait_seconds > 0:
+                        time.sleep(wait_seconds)
+                if current_anime.get("status") == "matched":
+                    anime = current_anime
+                    break
+        if anime:
             latin_aliases = [
                 alias for alias in anime.get("aliases", [])
                 if any(char.isalpha() and ord(char) < 128 for char in alias)

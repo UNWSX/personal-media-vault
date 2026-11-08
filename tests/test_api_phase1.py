@@ -18,6 +18,7 @@ sys.path.insert(0, str(APP_DIR))
 
 import server  # noqa: E402
 import batch_enhanced_ratings as batch  # noqa: E402
+import safe_network  # noqa: E402
 
 
 class PhaseOneApiTests(unittest.TestCase):
@@ -463,9 +464,51 @@ class MetadataSearchTests(unittest.TestCase):
         self.assertFalse(session["loggedIn"])
         self.assertEqual(session["source"], "none")
 
-    def test_douban_image_requests_do_not_rotate_hosts(self):
+    def test_douban_image_retry_stays_on_approved_exact_hosts(self):
         original = "https://img9.doubanio.com/view/photo/l/public/p123.jpg"
-        self.assertEqual(server.douban_image_variants(original), [original])
+        variants = server.douban_image_variants(original)
+        self.assertEqual(len(variants), 9)
+        self.assertEqual(
+            {
+                urllib.parse.urlsplit(url).hostname
+                for url in variants
+            },
+            {
+                "img1.doubanio.com",
+                "img2.doubanio.com",
+                "img3.doubanio.com",
+                "img4.doubanio.com",
+                "img5.doubanio.com",
+                "img6.doubanio.com",
+                "img7.doubanio.com",
+                "img8.doubanio.com",
+                "img9.doubanio.com",
+            },
+        )
+        for url in variants:
+            server.validate_remote_image_url(url)
+
+    def test_image_download_continues_after_denied_or_non_image_host(self):
+        original = "https://img9.doubanio.com/view/photo/l/public/p123.jpg"
+        image = b"\x89PNG\r\n\x1a\n" + b"x" * 2000
+        responses = [
+            server.UnsafeRemoteURLError("远程图片服务器返回 HTTP 403"),
+            (b"<script>access denied</script>" + b"x" * 2000, "text/html"),
+            (image, "image/png"),
+        ]
+        with mock.patch.object(
+            server,
+            "fetch_remote_bytes",
+            side_effect=responses,
+        ) as fetch:
+            raw = server.download_image(original)
+        self.assertEqual(raw, image)
+        self.assertEqual(fetch.call_count, 3)
+        self.assertTrue(all(
+            urllib.parse.urlsplit(call.args[0]).hostname
+            in safe_network.IMAGE_HOST_ALLOWLIST
+            for call in fetch.call_args_list
+        ))
 
     def test_access_restriction_errors_stop_following_requests(self):
         error = urllib.error.HTTPError(

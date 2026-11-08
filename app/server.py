@@ -1513,11 +1513,12 @@ def _missing_external_fields(item: dict) -> list[str]:
         field for field in ("imdbScore", "rottenTomatoesScore", "metacriticScore")
         if item.get(field) is None
     ]
-    tags = {str(tag).casefold() for tag in item.get("tags", [])}
-    if (
-        tags.intersection({"动画", "动漫", "animation"})
-        and item.get("bangumiScore") is None
-    ):
+    tags = " ".join(str(tag).casefold() for tag in item.get("tags", []))
+    is_anime = any(
+        marker in tags
+        for marker in ("动画", "动漫", "anime", "アニメ")
+    )
+    if is_anime and item.get("bangumiScore") is None:
         fields.append("bangumiScore")
     return fields
 
@@ -1950,13 +1951,17 @@ def sniff_image(raw: bytes) -> str:
 
 
 def douban_image_variants(url: str) -> list[str]:
-    """Return only the URL supplied by the upstream service.
-
-    Older releases rotated a Douban image URL across img1..img9 after an
-    error.  That can look like an attempt to evade access controls, so the
-    application now fails closed and leaves retry decisions to the user.
-    """
-    return [str(url or "").strip()]
+    """Retry the same image path across the explicitly approved Douban hosts."""
+    value = str(url or "").strip()
+    match = re.match(r"^(https?://)img[1-9]\.doubanio\.com(/.*)$", value)
+    if not match:
+        return [value]
+    scheme, path = match.groups()
+    order = (1, 2, 3, 9, 5, 6, 7, 8, 4)
+    return [
+        scheme + "img%d.doubanio.com" % number + path
+        for number in order
+    ]
 
 
 def download_image(url: str, referer: str | None = None) -> bytes:
@@ -1986,17 +1991,9 @@ def download_image(url: str, referer: str | None = None) -> bytes:
             )
             _CDN_FAILS = 0
         except UnsafeRemoteURLError as e:
-            # 404/403 = 这张图本来就不存在（比如没有 2x 版），不是网络故障
+            # A per-image denial should not poison the whole host: try the
+            # next explicitly allowed Douban image host.
             last_err = e
-            status_match = re.search(r"HTTP (\d+)", str(e))
-            if status_match and int(status_match.group(1)) in (401, 403, 418, 429):
-                host = (urllib.parse.urlsplit(candidate).hostname or "").lower()
-                if host:
-                    _ACCESS_RESTRICTED_HOSTS.add(host)
-                raise UpstreamAccessRestricted(
-                    host or "unknown",
-                    int(status_match.group(1)),
-                ) from e
             if is_cdn:
                 _CDN_FAILS += 1
                 if _CDN_FAILS >= 6:
@@ -3241,13 +3238,13 @@ def _lookup_imdb_season_candidates(
         ]
         if not selected:
             continue
-        years = [
+        years = {
             int(episode["year"])
             for episode in selected
             if episode.get("year") not in (None, "")
-        ]
+        }
         season_year = min(years) if years else None
-        if season_year is not None and season_year != wanted_year:
+        if years and wanted_year not in years:
             continue
         score = round(
             sum(float(episode["rating"]) for episode in selected) / len(selected),
@@ -3416,18 +3413,26 @@ def lookup_bangumi(
     wanted_full = _rt_normalize_title(query)
     parsed_query = extract_season(query)
     wanted_base = _rt_normalize_title(parsed_query["title"])
-    try:
-        payload = _post_json_url(
-            BANGUMI_SEARCH_URL,
-            {"keyword": parsed_query["title"], "filter": {"type": [2]}},
-            proxy=proxy,
-        )
-    except Exception as exc:
+    payload = None
+    last_error = None
+    for attempt in range(3):
+        try:
+            payload = _post_json_url(
+                BANGUMI_SEARCH_URL,
+                {"keyword": parsed_query["title"], "filter": {"type": [2]}},
+                proxy=proxy,
+            )
+            break
+        except Exception as exc:
+            last_error = exc
+            if attempt < 2:
+                time.sleep(0.6 * (attempt + 1))
+    if payload is None:
         return {
             "status": "error",
             "score": None,
             "reason": "LOOKUP_FAILED",
-            "errorType": type(exc).__name__,
+            "errorType": type(last_error).__name__,
         }
     exact = []
     for item in payload.get("data", []) if isinstance(payload, dict) else []:
@@ -3509,21 +3514,29 @@ def lookup_anime_aliases(
         "search: $search, type: ANIME, sort: SEARCH_MATCH) { id "
         "title { romaji english native } synonyms startDate { year } } } }"
     )
-    try:
-        payload = _post_json_url(
-            ANILIST_GRAPHQL_URL,
-            {
-                "query": graphql,
-                "variables": {"search": query},
-            },
-            proxy=proxy,
-        )
-    except Exception as exc:
+    payload = None
+    last_error = None
+    for attempt in range(3):
+        try:
+            payload = _post_json_url(
+                ANILIST_GRAPHQL_URL,
+                {
+                    "query": graphql,
+                    "variables": {"search": query},
+                },
+                proxy=proxy,
+            )
+            break
+        except Exception as exc:
+            last_error = exc
+            if attempt < 2:
+                time.sleep(0.6 * (attempt + 1))
+    if payload is None:
         return {
             "status": "error",
             "aliases": [],
             "reason": "LOOKUP_FAILED",
-            "errorType": type(exc).__name__,
+            "errorType": type(last_error).__name__,
         }
     wanted_full = _rt_normalize_title(query)
     wanted_base = _rt_normalize_title(extract_season(query)["title"])
