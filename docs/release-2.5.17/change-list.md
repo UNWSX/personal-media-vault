@@ -1,0 +1,21 @@
+# 2.5.17 修改清单
+
+- `LICENSE`
+  - 添加项目原创代码的 MIT 许可证。
+- `THIRD_PARTY_NOTICES.md`
+  - 添加历史参考、第三方服务、内容归属和使用边界说明。
+- `app/server.py`
+  - 只使用用户显式保存或导入的豆瓣登录态。
+  - 取消图片主机轮换。
+  - 对受限制的上游访问停止后续请求。
+  - 后台补分任务在访问受限时进入 `blocked` 状态，不再自动重试。
+- `app/batch_imdb.py`
+  - 默认及最小请求间隔调整为 1 秒。
+- `app/batch_enhanced_ratings.py`
+  - 默认及最小请求间隔调整为 1 秒。
+- `app/web/app.js`
+  - 更新登录态导入提示。
+- `app/web/index.html`
+  - 增加手动导入和第三方内容提示。
+- `tests/test_api_phase1.py`
+  - 新增插件 Cookie 不自动读取、图片主机不轮换、访问限制停止后续请求测试。
