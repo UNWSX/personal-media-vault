@@ -171,7 +171,12 @@ def is_obsidian_vault(p: Path) -> bool:
 
 def data_directory_for_vault(vault: Path) -> Path:
     if not is_obsidian_vault(vault):
-        return APP_DIR
+        try:
+            if APP_DIR.resolve().parent == vault.resolve():
+                return APP_DIR
+        except OSError:
+            pass
+        return vault / ".media-app"
     try:
         if APP_DIR.resolve().parent == vault.resolve():
             return APP_DIR
@@ -2975,14 +2980,24 @@ IMDB_GRAPHQL_URL = "https://api.graphql.imdb.com/"
 
 def _imdb_suggestion_json(title: str) -> dict:
     url = IMDB_SUGGESTION_URL % urllib.parse.quote(str(title).strip(), safe="")
-    return http_json(
-        url,
-        timeout=12,
-        headers={
-            "User-Agent": _HTTP_UA,
-            "Accept": "application/json",
-        },
-    )
+    last_error = None
+    for attempt in range(3):
+        try:
+            return http_json(
+                url,
+                timeout=12,
+                headers={
+                    "User-Agent": _HTTP_UA,
+                    "Accept": "application/json",
+                },
+            )
+        except UpstreamAccessRestricted:
+            raise
+        except Exception as exc:
+            last_error = exc
+            if attempt < 2:
+                time.sleep(0.6 * (attempt + 1))
+    raise last_error
 
 
 def _imdb_graphql_query(query: str, variables: dict | None = None) -> dict:
@@ -3003,13 +3018,24 @@ def _imdb_graphql_query(query: str, variables: dict | None = None) -> dict:
             "Referer": "https://www.imdb.com/",
         },
     )
-    try:
-        with urllib.request.urlopen(request, timeout=12) as response:
-            payload = json.loads(response.read(8 * 1024 * 1024).decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        _raise_for_access_restriction(exc, IMDB_GRAPHQL_URL)
-        raise
-    return payload if isinstance(payload, dict) else {}
+    last_error = None
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(request, timeout=12) as response:
+                payload = json.loads(
+                    response.read(8 * 1024 * 1024).decode("utf-8")
+                )
+            return payload if isinstance(payload, dict) else {}
+        except urllib.error.HTTPError as exc:
+            _raise_for_access_restriction(exc, IMDB_GRAPHQL_URL)
+            last_error = exc
+        except UpstreamAccessRestricted:
+            raise
+        except Exception as exc:
+            last_error = exc
+        if attempt < 2:
+            time.sleep(0.6 * (attempt + 1))
+    raise last_error
 
 
 def _imdb_graphql_title(imdb_id: str) -> dict:

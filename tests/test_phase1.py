@@ -666,6 +666,14 @@ class PhaseOneSafetyTests(unittest.TestCase):
         self.assertEqual(selected, app_dir)
         self.assertNotEqual(selected, self.vault / ".media-app")
 
+    def test_standalone_auxiliary_data_stays_with_media_data(self):
+        standalone = self.vault / "standalone-data"
+        standalone.mkdir()
+        self.assertEqual(
+            server.data_directory_for_vault(standalone),
+            standalone / ".media-app",
+        )
+
     def test_http_servers_use_exclusive_ports(self):
         first, first_port = server.bind_http_server(18100)
         second, second_port = server.bind_http_server(18100)

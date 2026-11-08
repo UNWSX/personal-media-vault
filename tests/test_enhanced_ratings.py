@@ -133,6 +133,23 @@ class BangumiAndAliasTests(unittest.TestCase):
             )
         self.assertEqual(result["status"], "matched")
 
+    def test_imdb_suggestion_retries_transient_network_failure(self):
+        payload = {
+            "d": [{
+                "id": "tt13293588",
+                "l": "Mushoku Tensei: Jobless Reincarnation",
+                "y": 2021,
+                "qid": "tvSeries",
+            }]
+        }
+        with mock.patch.object(
+            server,
+            "http_json",
+            side_effect=[OSError("temporary"), payload],
+        ), mock.patch.object(server.time, "sleep"):
+            result = server._imdb_suggestion_json("Mushoku Tensei")
+        self.assertEqual(result["d"][0]["id"], "tt13293588")
+
     def test_anime_alias_lookup_tries_original_title_after_first_miss(self):
         with tempfile.TemporaryDirectory() as temp:
             vault = Path(temp)
