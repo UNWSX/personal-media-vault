@@ -171,7 +171,8 @@ dotnet publish -c Release -r win-x64 --self-contained false -o out
 
 - 只支持 Windows（WinForms + WebView2）。
 - 游戏搜索依赖豆瓣登录态；没登录时电影/剧集/图书仍可用，游戏搜不到。
-- 删除只移走笔记文件，`attachments/` 里的封面图会留下（可能被多条记录共用）。
+- 删除时会把笔记和未被其它条目引用的本地主封面一并移入回收站；
+  被多条记录共用的封面会保留。
 - 远程图片只允许明确列出的豆瓣、Steam 和 Bangumi 图片主机；不在白名单的远程图片不会通过 `/media` 显示。
 - 单文件 exe 首次启动要解压，约 4–5 秒。
 
