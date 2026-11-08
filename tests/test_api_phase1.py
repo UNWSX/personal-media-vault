@@ -17,6 +17,7 @@ APP_DIR = Path(__file__).resolve().parents[1] / "app"
 sys.path.insert(0, str(APP_DIR))
 
 import server  # noqa: E402
+import batch_enhanced_ratings as batch  # noqa: E402
 
 
 class PhaseOneApiTests(unittest.TestCase):
@@ -78,7 +79,7 @@ class PhaseOneApiTests(unittest.TestCase):
         status, ping = self.request("/api/ping")
         self.assertEqual(status, 200)
         self.assertEqual(ping["app"], "media-vault")
-        self.assertEqual(ping["version"], "2.0.0")
+        self.assertEqual(ping["version"], "2.5.18")
         self.assertEqual(ping["protocolVersion"], 1)
         self.assertRegex(ping["instanceId"], r"^[0-9a-f]{32}$")
         self.assertEqual(Path(ping["vaultRoot"]), self.vault.resolve())
@@ -410,6 +411,33 @@ class PhaseOneApiTests(unittest.TestCase):
 
 
 class MetadataSearchTests(unittest.TestCase):
+    def test_auto_rating_delegates_to_batch_rule_engine(self):
+        with tempfile.TemporaryDirectory() as temp:
+            vault = Path(temp)
+            lib = server.Library(vault)
+            payload = {
+                "_itemPath": "02-电影阅读/teleplay/测试条目.md",
+                "type": "teleplay",
+                "title": "测试条目",
+            }
+            plan = {
+                "entries": [{
+                    "relativePath": payload["_itemPath"],
+                    "updates": {
+                        "imdbScore": 8.2,
+                        "rottenTomatoesScore": 91,
+                        "metacriticScore": 80,
+                    },
+                }],
+            }
+            with mock.patch.object(batch, "build_plan", return_value=plan) as build:
+                updates = server.auto_lookup_external_ratings(payload, lib=lib)
+        self.assertEqual(updates, plan["entries"][0]["updates"])
+        kwargs = build.call_args.kwargs
+        self.assertEqual(kwargs["only_path"], payload["_itemPath"])
+        self.assertEqual(kwargs["limit"], 1)
+        self.assertEqual(kwargs["wait_seconds"], 0)
+
     def test_douban_plugin_cookie_is_not_read_without_explicit_import(self):
         with tempfile.TemporaryDirectory() as temp:
             vault = Path(temp)

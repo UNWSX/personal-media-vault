@@ -10,7 +10,6 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-import server as server_module
 from batch_rotten_tomatoes import (
     _dedupe,
     _douban_title_candidate,
@@ -307,6 +306,7 @@ def _movie_title_aliases(
 def _build_identity(
     item: dict,
     fm: dict,
+    lib: Library,
     proxy: str | None,
     cache_state: dict,
     cache_path: Path | None,
@@ -329,7 +329,7 @@ def _build_identity(
     part = forced_part or parsed.get("part")
     if need_imdb or need_rt or need_metacritic:
         primary, title_source = _douban_title_candidate(
-            server_module.LIB,
+            lib,
             item,
             fm,
             {},
@@ -475,10 +475,10 @@ def build_plan(
     aliases: dict[str, list[str]] | None = None,
     wait_seconds: float = 0.1,
     cache_path: Path | None = None,
+    only_path: str | None = None,
 ) -> dict:
     vault = vault.resolve()
     lib = Library(vault)
-    server_module.LIB = lib
     items = lib.snapshot()
     cache_state = {
         "imdb": {},
@@ -501,6 +501,7 @@ def build_plan(
     relevant = [
         item for item in items
         if item.get("type") in SUPPORTED_TYPES
+        and (not only_path or item.get("path") == only_path)
         and (
             not title_filters
             or any(
@@ -592,6 +593,7 @@ def build_plan(
             else _build_identity(
                 item,
                 fm,
+                lib,
                 proxy,
                 cache_state,
                 cache_path,

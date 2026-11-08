@@ -370,79 +370,6 @@ class BangumiAndAliasTests(unittest.TestCase):
         external_lookup.assert_called()
         title_lookup.assert_not_called()
 
-    def test_auto_ratings_prefer_stable_wikidata_ids(self):
-        with mock.patch.object(
-            server,
-            "lookup_wikidata",
-            return_value={
-                "status": "matched",
-                "candidate": {
-                    "wikidataId": "Q130700148",
-                    "imdbId": "tt15398776",
-                    "rottenTomatoesId": "m/oppenheimer_2023",
-                    "metacriticId": "oppenheimer",
-                    "type": "movie",
-                },
-            },
-        ), mock.patch.object(
-            server,
-            "lookup_external_ids",
-            return_value={
-                "imdbScore": 8.2,
-                "rottenTomatoesScore": 93,
-                "metacriticScore": 90,
-                "errors": [],
-            },
-        ), mock.patch.object(server, "lookup_imdb") as title_imdb, \
-                mock.patch.object(server, "lookup_rotten_tomatoes") as title_rt, \
-                mock.patch.object(server, "lookup_metacritic") as title_metacritic:
-            result = server.auto_lookup_external_ratings({
-                "type": "movie",
-                "title": "Oppenheimer",
-                "datePublished": "2023-07-21",
-            })
-        self.assertEqual(result, {
-            "imdbScore": 8.2,
-            "rottenTomatoesScore": 93,
-            "metacriticScore": 90,
-        })
-        title_imdb.assert_not_called()
-        title_rt.assert_not_called()
-        title_metacritic.assert_not_called()
-
-    def test_auto_ratings_strip_season_suffix_for_source_lookup(self):
-        with mock.patch.object(
-            server,
-            "lookup_wikidata",
-            return_value={"status": "no_match", "reason": "NO_EXACT_MATCH"},
-        ), mock.patch.object(
-            server,
-            "lookup_imdb",
-            return_value={"status": "matched", "score": 9.0},
-        ) as imdb_lookup, mock.patch.object(
-            server,
-            "lookup_rotten_tomatoes_season",
-            return_value={"status": "matched", "score": 100},
-        ) as rt_lookup, mock.patch.object(
-            server,
-            "lookup_metacritic",
-            return_value={"status": "matched", "score": 96},
-        ) as metacritic_lookup:
-            result = server.auto_lookup_external_ratings({
-                "type": "teleplay",
-                "title": "绝命毒师 第四季",
-                "originalTitle": "Breaking Bad Season 4",
-                "datePublished": "2011-07-17",
-            })
-        self.assertEqual(result, {
-            "imdbScore": 9.0,
-            "rottenTomatoesScore": 100,
-            "metacriticScore": 96,
-        })
-        self.assertEqual(imdb_lookup.call_args.args[0], "Breaking Bad")
-        self.assertEqual(rt_lookup.call_args.args[0], "Breaking Bad")
-        self.assertEqual(metacritic_lookup.call_args.args[0], "Breaking Bad")
-
     def test_create_then_worker_applies_automatic_ratings(self):
         with tempfile.TemporaryDirectory() as temp:
             vault = Path(temp)
@@ -475,6 +402,84 @@ class BangumiAndAliasTests(unittest.TestCase):
         self.assertEqual(updated["imdbScore"], 8.2)
         self.assertEqual(updated["rottenTomatoesScore"], 93)
         self.assertEqual(updated["metacriticScore"], 90)
+
+    def test_auto_ratings_use_the_same_results_as_batch_tool(self):
+        cases = (
+            ("Part.1", "2023-07-02", 1, 7.6),
+            ("Part2", "2024-04-07", 2, 7.9),
+        )
+        for suffix, date_published, expected_part, score in cases:
+            with self.subTest(suffix=suffix), tempfile.TemporaryDirectory() as temp:
+                vault = Path(temp)
+                (vault / "02-电影阅读" / "teleplay").mkdir(parents=True)
+                (vault / "attachments").mkdir()
+                lib = server.Library(vault)
+                title = "无职转生Ⅱ到了异世界就拿出真本事" + suffix
+                created = server.create_note(lib, {
+                    "type": "teleplay",
+                    "title": title,
+                    "datePublished": date_published,
+                    "tags": ["动画"],
+                    "status": False,
+                })
+                with (
+                    mock.patch.object(
+                        batch,
+                        "lookup_imdb_by_id",
+                        return_value={"status": "matched", "score": score},
+                    ) as imdb_by_id,
+                    mock.patch.object(
+                        batch,
+                        "lookup_imdb",
+                        return_value={"status": "no_match", "score": None},
+                    ),
+                    mock.patch.object(
+                        batch,
+                        "lookup_wikidata",
+                        return_value={"status": "no_match"},
+                    ),
+                    mock.patch.object(
+                        batch,
+                        "lookup_rotten_tomatoes_season",
+                        return_value={"status": "no_match", "score": None},
+                    ),
+                    mock.patch.object(
+                        batch,
+                        "lookup_metacritic",
+                        return_value={"status": "no_match", "score": None},
+                    ),
+                    mock.patch.object(
+                        batch,
+                        "lookup_bangumi",
+                        return_value={"status": "no_match", "score": None},
+                    ),
+                    mock.patch.object(
+                        batch,
+                        "lookup_anime_aliases",
+                        return_value={"status": "no_match", "aliases": []},
+                    ),
+                ):
+                    batch_plan = batch.build_plan(
+                        vault,
+                        only_path=created["path"],
+                        wait_seconds=0,
+                    )
+                    automatic = server.auto_lookup_external_ratings(
+                        {
+                            "_itemPath": created["path"],
+                            "type": "teleplay",
+                            "title": title,
+                        },
+                        lib=lib,
+                    )
+                self.assertEqual(
+                    automatic,
+                    batch_plan["entries"][0]["updates"],
+                )
+                self.assertEqual(automatic, {"imdbScore": score})
+                kwargs = imdb_by_id.call_args.kwargs
+                self.assertEqual(kwargs["season"], 2)
+                self.assertEqual(kwargs["part"], expected_part)
 
     def test_worker_schedules_retry_when_sources_fail(self):
         with tempfile.TemporaryDirectory() as temp:

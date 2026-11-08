@@ -70,7 +70,7 @@ from douban_auth import (
 )
 
 APP_ID = "media-vault"
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.5.18"
 APP_PROTOCOL_VERSION = 1
 APP_INSTANCE_ID = uuid.uuid4().hex
 RATING_QUEUE: RatingJobQueue | None = None
@@ -1474,153 +1474,36 @@ def _configured_https_proxy() -> str | None:
     return value
 
 
-def auto_lookup_external_ratings(payload: dict) -> dict:
-    """Resolve optional external scores for a newly created film or TV item."""
+def auto_lookup_external_ratings(
+    payload: dict,
+    lib: "Library | None" = None,
+) -> dict:
+    """Resolve new movie/TV ratings through the batch tool's rule engine."""
     media_type = str(payload.get("type") or "").strip().lower()
     if media_type not in {"movie", "teleplay"}:
         return {}
-    title = str(payload.get("title") or "").strip()
-    if not title:
+    rel = str(payload.get("_itemPath") or "").strip()
+    target_lib = lib or LIB
+    if not rel or target_lib is None:
         return {}
-    original_title = str(
-        payload.get("_lookupTitle") or payload.get("originalTitle") or ""
-    ).strip()
-    parsed = extract_season(title)
-    season = parsed["season"] if media_type == "teleplay" else None
-    part = parsed.get("part")
-    raw_year = payload.get("datePublished") or payload.get("year")
-    year_match = re.search(r"\d{4}", str(raw_year or ""))
-    year = year_match.group(0) if year_match else None
-    tags = payload.get("tags") if isinstance(payload.get("tags"), list) else []
-    is_anime = any(
-        str(tag).casefold() in {"动画", "动漫", "animation"}
-        for tag in tags
+    from batch_enhanced_ratings import build_plan
+
+    plan = build_plan(
+        target_lib.vault,
+        proxy=_configured_https_proxy(),
+        only_path=rel,
+        limit=1,
+        wait_seconds=0,
+        cache_path=target_lib.data_dir / "ratings-cache.json",
     )
-    fields = ("imdbScore", "rottenTomatoesScore", "metacriticScore")
-    missing = {
-        field for field in fields
-        if payload.get(field) in (None, "")
-    }
-    if not missing and not (is_anime and payload.get("bangumiScore") in (None, "")):
-        return {}
-
-    candidates = []
-    for candidate in (original_title, title):
-        if candidate and candidate not in candidates:
-            candidates.append(candidate)
-    proxy = _configured_https_proxy()
-    updates = {}
-
-    # Prefer stable Wikidata IDs, then fall back to source-specific exact lookup.
-    for candidate in candidates:
-        lookup_query = extract_season(candidate)["title"] if season is not None else candidate
-        try:
-            resolved = lookup_wikidata(
-                lookup_query,
-                media_type,
-                year,
-                proxy=proxy,
-            )
-            if resolved.get("status") == "matched":
-                external = lookup_external_ids(
-                    resolved["candidate"],
-                    season=season,
-                    part=part,
-                    year=year,
-                    fields=missing,
-                )
-                updates.update({
-                    key: value
-                    for key, value in external.items()
-                    if key in fields and value is not None
-                })
-        except UpstreamAccessRestricted:
-            raise
-        except Exception:
-            pass
-        if not any(
-            payload.get(field) in (None, "") and field not in updates
-            for field in fields
-        ):
-            break
-
-    for candidate in candidates:
-        remaining = {
-            field for field in fields
-            if payload.get(field) in (None, "") and field not in updates
-        }
-        if not remaining:
-            break
-        source_title = (
-            extract_season(candidate)["title"]
-            if season is not None
-            else candidate
-        )
-        try:
-            if "imdbScore" in remaining:
-                imdb = (
-                    lookup_imdb(
-                        source_title,
-                        media_type,
-                        year,
-                        season=season,
-                        part=part,
-                    )
-                    if season is not None
-                    else lookup_imdb(candidate, media_type, year)
-                )
-                if imdb.get("status") == "matched":
-                    updates["imdbScore"] = imdb.get("score")
-        except UpstreamAccessRestricted:
-            raise
-        except Exception:
-            pass
-        try:
-            if "rottenTomatoesScore" in remaining:
-                rotten = (
-                    lookup_rotten_tomatoes_season(source_title, season, year)
-                    if season is not None
-                    else lookup_rotten_tomatoes(source_title, media_type, year)
-                )
-                if rotten.get("status") == "matched":
-                    updates["rottenTomatoesScore"] = rotten.get("score")
-        except UpstreamAccessRestricted:
-            raise
-        except Exception:
-            pass
-        try:
-            if "metacriticScore" in remaining:
-                metacritic = lookup_metacritic(
-                    source_title,
-                    media_type,
-                    year,
-                    season=season,
-                    part=part,
-                )
-                if metacritic.get("status") == "matched":
-                    updates["metacriticScore"] = metacritic.get("score")
-        except UpstreamAccessRestricted:
-            raise
-        except Exception:
-            pass
-
-    if is_anime and payload.get("bangumiScore") in (None, ""):
-        for candidate in candidates:
-            try:
-                bangumi = lookup_bangumi(
-                    candidate,
-                    year,
-                    season,
-                    proxy=proxy,
-                )
-                if bangumi.get("status") == "matched":
-                    updates["bangumiScore"] = bangumi.get("score")
-                    break
-            except UpstreamAccessRestricted:
-                raise
-            except Exception:
-                continue
-    return updates
+    entry = next(
+        (
+            item for item in plan.get("entries", [])
+            if item.get("relativePath") == rel
+        ),
+        None,
+    )
+    return dict((entry or {}).get("updates") or {})
 
 
 def _missing_external_fields(item: dict) -> list[str]:
@@ -1686,6 +1569,7 @@ def _process_rating_job(lib: "Library", job: dict) -> None:
         RATING_QUEUE.finish(rel, "completed")
         return
     payload = {
+        "_itemPath": rel,
         "type": item.get("type"),
         "title": item.get("title"),
         "originalTitle": item.get("originalTitle"),
@@ -1699,7 +1583,7 @@ def _process_rating_job(lib: "Library", job: dict) -> None:
     try:
         updates = {
             key: value
-            for key, value in auto_lookup_external_ratings(payload).items()
+            for key, value in auto_lookup_external_ratings(payload, lib=lib).items()
             if key in fields and value is not None
         }
     except UpstreamAccessRestricted as exc:
