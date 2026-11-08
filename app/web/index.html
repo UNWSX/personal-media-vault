@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>影音库</title>
+<link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <h1>影音库</h1>
+  </div>
+  <div class="stats" id="stats"></div>
+  <div class="spacer"></div>
+
+  <label class="search">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+         stroke-linecap="round"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+    <input id="q" type="search" placeholder="搜索片名 / 演员 / 导演 / 题材…" autocomplete="off" />
+    <kbd>/</kbd>
+  </label>
+
+  <button class="icon-btn" id="addBtn" title="添加媒体">
+    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+         stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+  </button>
+
+  <button class="icon-btn" id="refreshBtn" title="重新读取笔记（在 Obsidian 里改过之后点一下）">
+    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+         stroke-linecap="round" stroke-linejoin="round">
+      <path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/>
+    </svg>
+  </button>
+
+  <button class="icon-btn" id="backupBtn" title="立即备份整个媒体目录">
+    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+         stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 3v12"/><polyline points="7 10 12 15 17 10"/><path d="M4 21h16"/>
+    </svg>
+  </button>
+
+  <button class="icon-btn" id="randomBtn" title="随便看一部">
+    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+         stroke-linecap="round" stroke-linejoin="round">
+      <rect x="3" y="3" width="18" height="18" rx="4"/><circle cx="8.5" cy="8.5" r="1.4" fill="currentColor"/>
+      <circle cx="15.5" cy="15.5" r="1.4" fill="currentColor"/><circle cx="12" cy="12" r="1.4" fill="currentColor"/>
+    </svg>
+  </button>
+
+  <button class="icon-btn" id="themeBtn" title="切换主题">
+    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+         stroke-linecap="round"><circle cx="12" cy="12" r="4.2"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4"/></svg>
+  </button>
+</header>
+
+<section class="filters">
+  <div class="filter-row" id="typeRow">
+    <span class="filter-label">类型</span>
+  </div>
+  <div class="filter-row">
+    <span class="filter-label">状态</span>
+    <div class="seg" id="statusSeg">
+      <button data-v="all">全部</button>
+      <button data-v="incomplete">未完成</button>
+      <button data-v="completed">已完成</button>
+    </div>
+    <span class="filter-label" style="margin-left:14px">排序</span>
+    <div class="dropdown" id="sortDrop">
+      <button class="sort-trigger" id="sortBtn" type="button" aria-haspopup="listbox" aria-expanded="false">
+        <span class="sort-icon">↕</span>
+        <span id="sortLabel">标题</span>
+      </button>
+      <div class="dropdown-panel" id="sortPanel" hidden></div>
+    </div>
+    <button class="link-btn" id="moreBtn">更多筛选 ▾</button>
+    <div class="spacer"></div>
+    <span class="filter-label" id="countLabel"></span>
+  </div>
+  <div class="filter-row" id="moreRow" style="display:none">
+    <span class="filter-label">题材</span>
+    <span id="tagChips"></span>
+    <span class="filter-label" style="margin-left:14px">评分</span>
+    <div class="seg" id="scoreSeg">
+      <button data-v="all">全部</button>
+      <button data-v="9">9+</button>
+      <button data-v="8">8+</button>
+      <button data-v="7">7+</button>
+      <button data-v="0">未评分</button>
+    </div>
+  </div>
+</section>
+
+<main class="container">
+  <div class="grid" id="grid"></div>
+</main>
+
+<div class="page-scroll-rail" id="pageScrollRail" role="scrollbar"
+     aria-controls="grid" aria-orientation="vertical" aria-valuemin="0"
+     aria-valuemax="0" aria-valuenow="0" tabindex="0">
+  <div class="page-scroll-thumb" id="pageScrollThumb"></div>
+</div>
+
+<div class="scrim" id="scrim"></div>
+<aside class="drawer" id="drawer" aria-hidden="true">
+  <div class="drawer-head">
+    <strong style="font-size:13px">详情</strong>
+    <button class="close" id="closeDrawer" title="关闭 (Esc)">✕</button>
+  </div>
+  <div class="conflict-bar" id="conflictBar" hidden></div>
+  <div class="drawer-body" id="drawerBody"></div>
+</aside>
+
+<button class="to-top" id="toTop" title="回到顶部" aria-label="回到顶部">↑</button>
+
+<div class="toast" id="toast"></div>
+
+<!-- 添加媒体 -->
+<div class="modal-scrim" id="modalScrim"></div>
+<div class="modal" id="modal" aria-hidden="true">
+  <div class="modal-head">
+    <strong>添加媒体</strong>
+    <button class="close" id="modalClose" title="关闭 (Esc)">✕</button>
+  </div>
+
+  <div class="modal-body">
+    <!-- 搜索添加 -->
+    <div id="searchPane">
+      <div class="field">
+        <label>搜索豆瓣，选中即添加</label>
+        <div class="db-bar">
+          <input class="text" id="dbQ" placeholder="输入片名 / 书名…" autocomplete="off" />
+          <div class="seg" id="dbType">
+            <button data-v="movie" class="on"><span class="seg-ico">🎬</span><span class="seg-label">电影</span></button>
+            <button data-v="teleplay"><span class="seg-ico">📺</span><span class="seg-label">剧集</span></button>
+            <button data-v="book"><span class="seg-ico">📚</span><span class="seg-label">图书</span></button>
+            <button data-v="game"><span class="seg-ico">🎮</span><span class="seg-label">游戏</span></button>
+          </div>
+        </div>
+      </div>
+      <div class="db-session" id="dbSession" hidden>
+        <span class="db-session-state" id="dbSessionText">正在检查豆瓣登录状态…</span>
+        <button class="db-session-btn primary" id="dbLoginBtn" type="button" hidden>登录豆瓣</button>
+        <button class="db-session-btn" id="dbImportBtn" type="button" hidden>导入 Obsidian 登录态</button>
+        <input type="file" id="dbPluginFile" accept=".json,application/json" hidden />
+      </div>
+      <div id="dbResults" class="db-results"></div>
+      <div id="dbHint" class="db-hint">登录后会使用与 Obsidian 豆瓣插件相同的搜索通道。</div>
+    </div>
+
+    <!-- 手动填写 -->
+    <div id="manualPane" hidden>
+      <div class="field">
+        <label>类型</label>
+        <div class="seg" id="newType">
+          <button data-v="movie" class="on"><span class="seg-ico">🎬</span><span class="seg-label">电影</span></button>
+          <button data-v="teleplay"><span class="seg-ico">📺</span><span class="seg-label">剧集</span></button>
+          <button data-v="game"><span class="seg-ico">🎮</span><span class="seg-label">游戏</span></button>
+          <button data-v="book"><span class="seg-ico">📚</span><span class="seg-label">图书</span></button>
+        </div>
+      </div>
+
+      <div class="field">
+        <label>标题 <span class="req">*</span></label>
+        <input class="text" id="newTitle" placeholder="例如：沙丘 3" autocomplete="off" />
+      </div>
+
+      <div class="row2">
+        <div class="field">
+          <label>发行日期</label>
+          <input class="text" id="newDate" type="date" />
+        </div>
+        <div class="field">
+          <label>豆瓣评分（0–10）</label>
+          <input class="text" id="newScore" type="number" min="0" max="10" step="0.1" placeholder="可留空" />
+        </div>
+      </div>
+
+      <div class="field">
+        <label id="creatorLabel">导演</label>
+        <input class="text" id="newCreator" autocomplete="off" />
+      </div>
+
+      <div class="field">
+        <label>题材（逗号分隔）</label>
+        <input class="text" id="newTags" placeholder="科幻, 冒险" autocomplete="off" />
+      </div>
+
+      <div class="field">
+        <label>简介</label>
+        <textarea id="newDesc" placeholder="剧情简介 / 短评（可留空）"></textarea>
+      </div>
+
+      <div class="field">
+        <label>封面</label>
+        <div class="drop" id="dropZone">
+          <span>拖入图片 / 点击选择文件 / 直接 Ctrl+V 粘贴</span>
+          <input type="file" id="fileInput" accept="image/*" hidden />
+        </div>
+        <input class="text" id="newImgUrl" placeholder="或粘贴图片网址 https://…（可留空）" autocomplete="off" />
+        <div class="preview" id="imgPreview"></div>
+      </div>
+
+      <div class="field">
+        <label>观看状态</label>
+        <div class="seg" id="newStatus">
+          <button data-v="todo" class="on">未看</button>
+          <button data-v="done">已看</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-foot">
+    <button class="link-btn" id="toggleManual">找不到？手动填写</button>
+    <button class="link-btn" id="diagBtn" title="真的去问一次豆瓣，看返回什么">自检</button>
+    <span class="save-hint" id="newHint"></span>
+    <button class="btn" id="newCancel">取消</button>
+    <button class="btn primary" id="newSubmit" hidden>创建</button>
+  </div>
+</div>
+
+<script src="/static/save_outcome.js"></script>
+<script src="/static/compat_logic.js"></script>
+<script src="/static/scroll_rail.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

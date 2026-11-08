@@ -1,0 +1,31 @@
+# 2.5.12 修改清单
+
+- `app/douban_auth.py`
+  - 校验豆瓣登录 Cookie。
+  - 使用 Windows DPAPI 加密保存、读取和清除登录态。
+  - 拒绝换行注入、空值、超长 Cookie 和非登录 Cookie。
+- `app/server.py`
+  - 新增 `/api/douban/session` GET/POST 和 `/api/douban/logout`。
+  - 独立版本地登录态优先于 Obsidian 插件登录态。
+  - API 仅返回登录状态和来源，不返回 Cookie。
+- `shell/DoubanLoginForm.cs`
+  - 内置 WebView2 豆瓣登录窗口。
+  - 从 WebView2 的 CookieManager 收集登录 Cookie。
+  - 通过仅限本机客户端的 API 保存加密登录态。
+- `shell/MainForm.cs`
+  - 接收前端的豆瓣登录请求，并回传登录状态变化。
+- `app/web/index.html`、`app/web/style.css`、`app/web/app.js`
+  - 添加登录、导入 Obsidian 登录态和清除按钮。
+  - 显示当前登录来源。
+  - 登录后自动刷新状态并重新执行当前搜索。
+- `app/web/scroll_rail.js`
+  - 增加可测试的滑块几何与滚动位置换算。
+  - 右侧滑轨支持拖动、轨道点击、滚轮和键盘操作。
+- `app/web/style.css`
+  - 扩大滑轨交互命中区，同时保持细线视觉样式。
+- `tests/test_douban_auth.py`
+  - 增加 Cookie 校验、加密存储和清除测试。
+- `tests/test_api_phase1.py`
+  - 增加登录态 API、加密落盘、无效 Cookie 和清除测试。
+- `tests/test_scroll_rail.js`
+  - 增加滑块尺寸、位置换算和短页面边界测试。

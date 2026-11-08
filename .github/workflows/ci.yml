@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "7.0.x"
+
+      - name: Python tests
+        run: python -m unittest discover -s tests -v
+
+      - name: JavaScript checks
+        shell: pwsh
+        run: |
+          node --check app/web/app.js
+          node --check app/web/compat_logic.js
+          node --check app/web/save_outcome.js
+          node --check app/web/scroll_rail.js
+          node tests/test_compat_logic.js
+          node tests/test_save_outcome.js
+          node tests/test_scroll_rail.js
+
+      - name: .NET Release build
+        run: dotnet build shell/AppHost.csproj -c Release

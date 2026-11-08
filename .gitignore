@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+shell/bin/
+shell/obj/
+build/
+dist/
+*.spec
+*.log
+.window.json
+.test-artifacts/
+.media-app/
+secrets/
+数据/
+vault-path.txt
+*.zip

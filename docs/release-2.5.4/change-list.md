@@ -1,0 +1,21 @@
+# 2.5.4 修改清单
+
+- `app/media_seasons.py`
+  - 新增中英文季号解析。
+- `app/server.py`
+  - 新增 Rotten Tomatoes 季页面评分查询。
+  - 新增 IMDb 分集评分汇总。
+  - 新增 Bangumi 搜索评分。
+  - 新增 AniList 动画别名转换。
+- `app/batch_enhanced_ratings.py`
+  - 新增分季修复、动画评分补全、缓存、预览和安全执行。
+- `app/web/compat_logic.js`
+  - 新增 IMDb 优先网络评分排序函数。
+  - 新增系列分组排序键。
+- `app/web/app.js`
+  - 标题排序改为系列分组、组内旧到新。
+  - 搜索标题命中时过滤剧情简介误命中。
+  - 缺失评分模块直接隐藏。
+  - IMDb、烂番茄、Bangumi 独立显示。
+- `tests/`
+  - 增加季号、Rotten Tomatoes 季页面、IMDb 季平均、Bangumi、AniList、排序和搜索相关测试。
