@@ -10,11 +10,13 @@
 > 第三方海报、简介、评分数据库或商标。详见
 > [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。
 
-当前源码版本：`2.5.16`。
+当前源码版本：`2.5.16 + 合规加固`。
 
 GitHub：<https://github.com/UNWSX/personal-media-vault>
 
-2.5.16 安装包发布在 GitHub Releases。
+`main` 分支已加入更保守的第三方访问规则。现有 2.5.16 安装包尚未使用这些规则
+重新打包；公开分发前应从当前源码重新构建并复核。个人本地定制版可以保留自己需要的
+便利功能，但不应作为默认公开下载包分发。
 
 ---
 
