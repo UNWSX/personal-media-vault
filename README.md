@@ -4,6 +4,12 @@
 支持直接管理 Obsidian Vault 中的 Markdown，也提供不需要 Obsidian 的独立分享版。
 媒体笔记始终是正式数据源，程序读写 front matter 字段，并尽量保持正文与其它字段不变。
 
+> **使用边界**：本项目是非官方的本地工具，与豆瓣、IMDb、烂番茄、
+> Metacritic、Steam、Bangumi 等平台没有隶属或合作关系。请仅用于个人、
+> 非商业、低频率的元数据管理，并遵守各平台条款。软件不会附带或再许可
+> 第三方海报、简介、评分数据库或商标。详见
+> [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。
+
 当前源码版本：`2.5.16`。
 
 GitHub：<https://github.com/UNWSX/personal-media-vault>
@@ -151,11 +157,13 @@ dotnet publish -c Release -r win-x64 --self-contained false -o out
 媒体搜索优先采用与 Obsidian 豆瓣插件相同的 `www.douban.com/j/search` 接口；
 搜索页不可用时才回退到 `subject_suggest`，避免上游返回空数组时误显示“没搜到”。
 
-**登录态复用**：游戏接口匿名会 403，所以从 `.obsidian/plugins/obsidian-douban-plugin/data.json`
-里读插件登录后的请求头（含 Cookie），和插件发一样的请求。Cookie 只在本机用。
+**登录态导入**：游戏接口匿名可能返回 403。用户可以在界面中主动选择
+`.obsidian/plugins/obsidian-douban-plugin/data.json`，把插件已有的登录态导入本程序；
+程序不会在后台静默读取插件配置。导入后的 Cookie 只在本机使用，并由 Windows
+DPAPI 加密保存。
 
-**封面**：豆瓣图床是多主机（`img1..img9`），部分主机会返回反爬 HTML。
-下载时按主机轮换重试，并用文件头魔数校验（JPEG/PNG/WebP），**不是图片就绝不落盘**；
+**封面**：下载请求只使用上游返回的原始 URL，不再轮换图片主机或在访问受限后重试其他主机。
+下载后用文件头魔数校验（JPEG/PNG/WebP），**不是图片就绝不落盘**；
 `/spic/` 这类小图会自动升级成 `/lpic/`。
 
 **标题排序**：中文数字（第X季、X部）按数值比较，`第八季` 不会排到 `第一季` 前面；
@@ -373,6 +381,7 @@ python app\batch_enhanced_ratings.py `
 ```
 
 `--proxy` 仅用于当前网络无法直连 Bangumi 的情况，可按实际代理地址替换。
+批量补分默认且至少保持 1 秒请求间隔；遇到 403、429、验证码或其他访问限制时应停止执行。
 
 标题排序采用“系列分组、组内按发行日期从旧到新”；搜索命中标题时优先只展示标题结果，
 避免剧情介绍提到角色时出现不相关作品。网络评分排序优先使用 IMDb，缺失时回退豆瓣。
@@ -417,4 +426,6 @@ API 和日志不会返回 Cookie。没有登录态时继续使用公开搜索回
 
 ## 许可
 
-个人使用，无担保。第三方接口（豆瓣）的使用请遵守其条款。
+项目原创代码采用 [MIT License](LICENSE)。该许可证不覆盖第三方代码、图片、
+简介、评分数据、API 内容或商标。使用第三方服务时请遵守对应条款，并阅读
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。

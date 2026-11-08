@@ -77,6 +77,33 @@ RATING_QUEUE: RatingJobQueue | None = None
 _RATING_WORKER_THREAD: threading.Thread | None = None
 _RATING_WORKER_STOP = threading.Event()
 _RATING_WORKER_WAKE = threading.Event()
+_ACCESS_RESTRICTED_HOSTS: set[str] = set()
+
+
+class UpstreamAccessRestricted(RuntimeError):
+    """Raised when a source explicitly denies or throttles automated access."""
+
+    def __init__(self, host: str, status: int):
+        self.host = host
+        self.status = int(status)
+        super().__init__("上游服务拒绝或限制了访问（HTTP %d）" % self.status)
+
+
+def _raise_for_access_restriction(exc: BaseException, url: str) -> None:
+    if not isinstance(exc, urllib.error.HTTPError):
+        return
+    if exc.code not in (401, 403, 418, 429):
+        return
+    host = (urllib.parse.urlsplit(url).hostname or "").lower()
+    if host:
+        _ACCESS_RESTRICTED_HOSTS.add(host)
+    raise UpstreamAccessRestricted(host or "unknown", exc.code) from exc
+
+
+def _assert_host_not_restricted(url: str) -> None:
+    host = (urllib.parse.urlsplit(url).hostname or "").lower()
+    if host and host in _ACCESS_RESTRICTED_HOSTS:
+        raise UpstreamAccessRestricted(host, 403)
 
 def _app_dir() -> Path:
     # 打包成 exe 后，代码在临时解压目录里，但「库路径」要以 exe 所在目录为准
@@ -1471,6 +1498,8 @@ def auto_lookup_external_ratings(payload: dict) -> dict:
                     for key, value in external.items()
                     if key in fields and value is not None
                 })
+        except UpstreamAccessRestricted:
+            raise
         except Exception:
             pass
         if not any(
@@ -1506,6 +1535,8 @@ def auto_lookup_external_ratings(payload: dict) -> dict:
                 )
                 if imdb.get("status") == "matched":
                     updates["imdbScore"] = imdb.get("score")
+        except UpstreamAccessRestricted:
+            raise
         except Exception:
             pass
         try:
@@ -1517,6 +1548,8 @@ def auto_lookup_external_ratings(payload: dict) -> dict:
                 )
                 if rotten.get("status") == "matched":
                     updates["rottenTomatoesScore"] = rotten.get("score")
+        except UpstreamAccessRestricted:
+            raise
         except Exception:
             pass
         try:
@@ -1530,6 +1563,8 @@ def auto_lookup_external_ratings(payload: dict) -> dict:
                 )
                 if metacritic.get("status") == "matched":
                     updates["metacriticScore"] = metacritic.get("score")
+        except UpstreamAccessRestricted:
+            raise
         except Exception:
             pass
 
@@ -1545,6 +1580,8 @@ def auto_lookup_external_ratings(payload: dict) -> dict:
                 if bangumi.get("status") == "matched":
                     updates["bangumiScore"] = bangumi.get("score")
                     break
+            except UpstreamAccessRestricted:
+                raise
             except Exception:
                 continue
     return updates
@@ -1623,11 +1660,21 @@ def _process_rating_job(lib: "Library", job: dict) -> None:
         "metacriticScore": item.get("metacriticScore"),
         "bangumiScore": item.get("bangumiScore"),
     }
-    updates = {
-        key: value
-        for key, value in auto_lookup_external_ratings(payload).items()
-        if key in fields and value is not None
-    }
+    try:
+        updates = {
+            key: value
+            for key, value in auto_lookup_external_ratings(payload).items()
+            if key in fields and value is not None
+        }
+    except UpstreamAccessRestricted as exc:
+        lib.log.event(
+            "rating_job_access_restricted",
+            level="warning",
+            path=rel,
+            status=exc.status,
+        )
+        RATING_QUEUE.finish(rel, "blocked", error="ACCESS_RESTRICTED")
+        return
     current = item
     if updates:
         try:
@@ -1983,21 +2030,21 @@ def sniff_image(raw: bytes) -> str:
 
 
 def douban_image_variants(url: str) -> list[str]:
-    """豆瓣图床是 img1~img9 多主机，同一张图换台机器经常就能拿到。
-    实测 img9 会返回反爬页、img4~img8 偶发 SSL 断连，所以优先试 1-3。"""
-    m = re.match(r"^(https?://)img\d\.doubanio\.com(/.*)$", url)
-    if not m:
-        return [url]
-    proto, path = m.groups()
-    order = [1, 2, 3, 9, 5, 6, 7, 8, 4]
-    return [proto + "img%d.doubanio.com" % n + path for n in order]
+    """Return only the URL supplied by the upstream service.
+
+    Older releases rotated a Douban image URL across img1..img9 after an
+    error.  That can look like an attempt to evade access controls, so the
+    application now fails closed and leaves retry decisions to the user.
+    """
+    return [str(url or "").strip()]
 
 
 def download_image(url: str, referer: str | None = None) -> bytes:
-    """下载并校验；不是真图片就抛异常，绝不落盘。豆瓣图床会自动换主机重试。"""
+    """Download the exact upstream image URL once, verify it, then save."""
     global _CDN_FAILS, _CDN_DOWN
     last_err: Exception | None = None
     for candidate in douban_image_variants(url):
+        _assert_host_not_restricted(candidate)
         is_cdn = not ("doubanio.com" in candidate or "douban.com" in candidate)
         if is_cdn and _CDN_DOWN:
             continue
@@ -2021,6 +2068,15 @@ def download_image(url: str, referer: str | None = None) -> bytes:
         except UnsafeRemoteURLError as e:
             # 404/403 = 这张图本来就不存在（比如没有 2x 版），不是网络故障
             last_err = e
+            status_match = re.search(r"HTTP (\d+)", str(e))
+            if status_match and int(status_match.group(1)) in (401, 403, 418, 429):
+                host = (urllib.parse.urlsplit(candidate).hostname or "").lower()
+                if host:
+                    _ACCESS_RESTRICTED_HOSTS.add(host)
+                raise UpstreamAccessRestricted(
+                    host or "unknown",
+                    int(status_match.group(1)),
+                ) from e
             if is_cdn:
                 _CDN_FAILS += 1
                 if _CDN_FAILS >= 6:
@@ -2106,16 +2162,8 @@ HOST_REXXAR = os.environ.get("MEDIAVAULT_HOST_REXXAR", "https://m.douban.com")
 
 _HEADER_CACHE = {"key": None, "headers": None}
 
-# 这些头不能照抄：照抄会让服务器返回 gzip/br 压缩体，而我们不自动解压
-HEADERS_TO_DROP = {
-    "accept-encoding", "content-length", "connection", "transfer-encoding",
-    "host", "origin", "referer", "cookie2", "te", "upgrade",
-}
-HEADER_PREFIX_DROP = ("sec-", "proxy-")
-
-
 def douban_headers() -> dict:
-    """Use the app's encrypted session, then fall back to the Obsidian plugin."""
+    """Use only the encrypted session explicitly saved by the user."""
     base = {
         "User-Agent": DOUBAN_UA,
         "Accept": "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
@@ -2134,12 +2182,7 @@ def douban_headers() -> dict:
     except (OSError, DoubanAuthError):
         local = None
 
-    path = LIB.vault / ".obsidian" / "plugins" / "obsidian-douban-plugin" / "data.json"
-    try:
-        plugin_mtime = path.stat().st_mtime
-    except OSError:
-        plugin_mtime = 0.0
-    cache_key = (local_mtime, plugin_mtime)
+    cache_key = local_mtime
     if _HEADER_CACHE["headers"] is not None and _HEADER_CACHE["key"] == cache_key:
         return dict(_HEADER_CACHE["headers"])
 
@@ -2150,24 +2193,6 @@ def douban_headers() -> dict:
         _HEADER_CACHE["headers"] = dict(headers)
         return headers
 
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-        cookies = str(raw.get("loginCookiesContent") or "").strip()
-        if cookies:
-            headers["Cookie"] = cookies
-        blob = raw.get("loginHeadersContent") or ""
-        if blob.strip().startswith("{"):
-            parsed = json.loads(blob)
-            for k, v in parsed.items():
-                lk = k.lower()
-                if lk in HEADERS_TO_DROP or lk.startswith(HEADER_PREFIX_DROP):
-                    continue
-                if lk == "cookie" and cookies:
-                    continue
-                if isinstance(v, str) and v.strip():
-                    headers[k] = v
-    except Exception:
-        pass
     _HEADER_CACHE["key"] = cache_key
     _HEADER_CACHE["headers"] = dict(headers)
     return headers
@@ -2183,23 +2208,10 @@ def douban_session_status() -> dict:
         local = load_douban_session(LIB.data_dir) if LIB is not None else None
     except (OSError, DoubanAuthError):
         local = None
-    plugin = (
-        LIB is not None
-        and (
-            LIB.vault
-            / ".obsidian"
-            / "plugins"
-            / "obsidian-douban-plugin"
-            / "data.json"
-        ).is_file()
-    )
-    using_plugin = bool(plugin and not local and douban_logged_in())
     return {
         "ok": True,
-        "loggedIn": douban_logged_in(),
-        "source": "standalone" if local else (
-            "obsidian-plugin" if using_plugin else "none"
-        ),
+        "loggedIn": local is not None,
+        "source": "standalone" if local else "none",
         "canLogin": True,
     }
 
@@ -2229,13 +2241,18 @@ def decode_body(raw: bytes, content_encoding: str | None) -> bytes:
 def douban_get(url: str, referer: str | None = None, timeout: float = 10.0) -> bytes:
     if MOCK_DIR:
         return mock_douban_get(url)
+    _assert_host_not_restricted(url)
     headers = douban_headers()
     if referer:
         headers["Referer"] = referer
     req = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        raw = resp.read(8 * 1024 * 1024)
-        return decode_body(raw, resp.headers.get("Content-Encoding"))
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read(8 * 1024 * 1024)
+            return decode_body(raw, resp.headers.get("Content-Encoding"))
+    except urllib.error.HTTPError as exc:
+        _raise_for_access_restriction(exc, url)
+        raise
 
 
 def mock_douban_get(url: str) -> bytes:
@@ -2515,11 +2532,16 @@ def call_with_timeout(fn, seconds: float, default=None):
 
 def http_json(url: str, timeout: float = 8.0, headers: dict | None = None):
     """轻量 JSON 请求：不重试、不抛大异常，失败由调用方兜。"""
+    _assert_host_not_restricted(url)
     req = urllib.request.Request(url, headers=headers or {
         "User-Agent": _HTTP_UA, "Accept": "application/json",
     })
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.loads(r.read().decode("utf-8", errors="replace"))
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode("utf-8", errors="replace"))
+    except urllib.error.HTTPError as exc:
+        _raise_for_access_restriction(exc, url)
+        raise
 
 
 def steam_search_appid(name: str):
@@ -2615,12 +2637,15 @@ def fetch_metacritic_score(appid=None, en_name: str = "", zh_name: str = "") -> 
                 cs = (item.get("criticScoreSummary") or {}).get("score")
                 if cs:
                     return float(cs)
+        except UpstreamAccessRestricted:
+            raise
         except Exception:
             continue
     return None
 
 
 def _metacritic_text(url: str) -> str:
+    _assert_host_not_restricted(url)
     request = urllib.request.Request(
         url,
         headers={
@@ -2629,8 +2654,12 @@ def _metacritic_text(url: str) -> str:
             "Accept-Language": "en-US,en;q=0.9",
         },
     )
-    with urllib.request.urlopen(request, timeout=15) as response:
-        return response.read(6 * 1024 * 1024).decode("utf-8", errors="replace")
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            return response.read(6 * 1024 * 1024).decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        _raise_for_access_restriction(exc, url)
+        raise
 
 
 def lookup_metacritic(
@@ -2767,6 +2796,7 @@ def _rt_request_json(query: str) -> dict:
         "filters": "isEmsSearchable = 1",
     }).encode("utf-8")
     last_error = None
+    _assert_host_not_restricted(RT_ALGOLIA_URL)
     for attempt in range(3):
         request = urllib.request.Request(
             RT_ALGOLIA_URL,
@@ -2784,6 +2814,11 @@ def _rt_request_json(query: str) -> dict:
         try:
             with urllib.request.urlopen(request, timeout=12) as response:
                 return json.loads(response.read(2 * 1024 * 1024).decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            _raise_for_access_restriction(exc, RT_ALGOLIA_URL)
+            last_error = exc
+            if attempt < 2:
+                time.sleep(0.6 * (attempt + 1))
         except (OSError, ValueError) as exc:
             last_error = exc
             if attempt < 2:
@@ -2903,6 +2938,7 @@ def fetch_rotten_tomatoes_score(
 
 
 def _rt_text(url: str) -> str:
+    _assert_host_not_restricted(url)
     request = urllib.request.Request(
         url,
         headers={
@@ -2911,8 +2947,12 @@ def _rt_text(url: str) -> str:
             "Accept-Language": "en-US,en;q=0.9",
         },
     )
-    with urllib.request.urlopen(request, timeout=15) as response:
-        return response.read(4 * 1024 * 1024).decode("utf-8", errors="replace")
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            return response.read(4 * 1024 * 1024).decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        _raise_for_access_restriction(exc, url)
+        raise
 
 
 def lookup_rotten_tomatoes_season(
@@ -3033,6 +3073,7 @@ def _imdb_graphql_query(query: str, variables: dict | None = None) -> dict:
         "query": query,
         "variables": variables or {},
     }).encode("utf-8")
+    _assert_host_not_restricted(IMDB_GRAPHQL_URL)
     request = urllib.request.Request(
         IMDB_GRAPHQL_URL,
         data=body,
@@ -3045,8 +3086,12 @@ def _imdb_graphql_query(query: str, variables: dict | None = None) -> dict:
             "Referer": "https://www.imdb.com/",
         },
     )
-    with urllib.request.urlopen(request, timeout=12) as response:
-        payload = json.loads(response.read(8 * 1024 * 1024).decode("utf-8"))
+    try:
+        with urllib.request.urlopen(request, timeout=12) as response:
+            payload = json.loads(response.read(8 * 1024 * 1024).decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        _raise_for_access_restriction(exc, IMDB_GRAPHQL_URL)
+        raise
     return payload if isinstance(payload, dict) else {}
 
 
@@ -3619,6 +3664,7 @@ def _wikidata_json(params: dict, proxy: str | None = None) -> dict:
     )
     opener = urllib.request.build_opener(handler)
     last_error = None
+    _assert_host_not_restricted(WIKIDATA_API_URL)
     for attempt in range(3):
         request = urllib.request.Request(
             WIKIDATA_API_URL + "?" + query,
@@ -3630,6 +3676,11 @@ def _wikidata_json(params: dict, proxy: str | None = None) -> dict:
         try:
             with opener.open(request, timeout=20) as response:
                 return json.loads(response.read(8 * 1024 * 1024).decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            _raise_for_access_restriction(exc, WIKIDATA_API_URL)
+            last_error = exc
+            if attempt < 2:
+                time.sleep(0.8 * (attempt + 1))
         except (OSError, ValueError) as exc:
             last_error = exc
             if attempt < 2:

@@ -2000,7 +2000,7 @@
       if (doubanLogin) return;
       loginButton.hidden = false;
       importButton.hidden = false;
-      label.textContent = "未登录：公开搜索可用，登录后能稳定搜索游戏和更多条目";
+      label.textContent = "未登录：公开搜索可用；如使用插件登录态，请手动选择 data.json，程序不会在后台读取";
       label.className = "db-session-state";
     } catch (err) {
       session.hidden = false;
@@ -2115,7 +2115,7 @@
     } catch (err) {
       if (err.name === "AbortError" || requestId !== searchSequence) return;
       const hint = requestType === "game" && !doubanLogin
-        ? "游戏搜索需要豆瓣登录：在 Obsidian 的豆瓣插件里登录一次，然后重启这个程序。"
+        ? "游戏搜索需要豆瓣登录：先在 Obsidian 豆瓣插件中登录，再手动点击“导入 Obsidian 登录态”选择 data.json。"
         : `搜索失败：${err.message}（可以改用「手动填写」）`;
       $("#dbHint").textContent = hint;
       $("#dbHint").className = "db-hint err";

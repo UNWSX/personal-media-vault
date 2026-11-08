@@ -354,7 +354,12 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--vault", required=True)
     parser.add_argument("--limit", type=int)
-    parser.add_argument("--wait", type=float, default=0.15)
+    parser.add_argument(
+        "--wait",
+        type=float,
+        default=1.0,
+        help="Minimum seconds between upstream requests (default: 1.0)",
+    )
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument("--dry-run", action="store_true")
     action.add_argument("--apply", action="store_true")
@@ -368,7 +373,7 @@ def main(argv=None) -> int:
         plan = build_plan(
             vault,
             limit=args.limit,
-            wait_seconds=max(0, args.wait),
+            wait_seconds=max(1.0, args.wait),
             cache_path=Path(args.cache) if args.cache else None,
         )
         output = Path(args.output) if args.output else Path.cwd() / (

@@ -398,7 +398,7 @@ class PhaseOneApiTests(unittest.TestCase):
 
 
 class MetadataSearchTests(unittest.TestCase):
-    def test_douban_plugin_cookie_content_is_reused_locally(self):
+    def test_douban_plugin_cookie_is_not_read_without_explicit_import(self):
         with tempfile.TemporaryDirectory() as temp:
             vault = Path(temp)
             plugin = vault / ".obsidian" / "plugins" / "obsidian-douban-plugin"
@@ -415,10 +415,32 @@ class MetadataSearchTests(unittest.TestCase):
                 server.LIB = server.Library(vault)
                 server._HEADER_CACHE["headers"] = None
                 headers = server.douban_headers()
+                session = server.douban_session_status()
             finally:
                 server.LIB = previous_lib
                 server._HEADER_CACHE["headers"] = None
-        self.assertEqual(headers["Cookie"], "bid=test; dbcl2=test")
+        self.assertNotIn("Cookie", headers)
+        self.assertFalse(session["loggedIn"])
+        self.assertEqual(session["source"], "none")
+
+    def test_douban_image_requests_do_not_rotate_hosts(self):
+        original = "https://img9.doubanio.com/view/photo/l/public/p123.jpg"
+        self.assertEqual(server.douban_image_variants(original), [original])
+
+    def test_access_restriction_errors_stop_following_requests(self):
+        error = urllib.error.HTTPError(
+            "https://example.test/path",
+            429,
+            "Too Many Requests",
+            {},
+            None,
+        )
+        with self.assertRaises(server.UpstreamAccessRestricted) as raised:
+            server._raise_for_access_restriction(error, "https://example.test/path")
+        self.assertEqual(raised.exception.status, 429)
+        self.assertEqual(raised.exception.host, "example.test")
+        with self.assertRaises(server.UpstreamAccessRestricted):
+            server._assert_host_not_restricted("https://example.test/next")
 
     def test_rotten_tomatoes_lookup_uses_matching_meter_score(self):
         payload = {
