@@ -77,10 +77,25 @@ namespace MediaVaultWebLauncher
 
                 bool ready = false;
                 DateTime deadline = DateTime.UtcNow.AddSeconds(90);
+                DateTime? processExitDeadline = null;
                 while (DateTime.UtcNow < deadline && !ready)
                 {
                     Thread.Sleep(300);
-                    if (serviceProcess != null && serviceProcess.HasExited)
+                    if (
+                        serviceProcess != null
+                        && serviceProcess.HasExited
+                        && !processExitDeadline.HasValue
+                    )
+                    {
+                        // PyInstaller one-file executables may hand off to a
+                        // child process and let the parent exit before the
+                        // HTTP listener is ready.
+                        processExitDeadline = DateTime.UtcNow.AddSeconds(10);
+                    }
+                    if (
+                        processExitDeadline.HasValue
+                        && DateTime.UtcNow >= processExitDeadline.Value
+                    )
                     {
                         break;
                     }
