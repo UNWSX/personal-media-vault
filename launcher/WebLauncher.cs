@@ -72,22 +72,34 @@ namespace MediaVaultWebLauncher
                     return;
                 }
 
+                bool ready = false;
                 DateTime deadline = DateTime.UtcNow.AddSeconds(90);
-                while (DateTime.UtcNow < deadline && port == 0)
+                while (DateTime.UtcNow < deadline && !ready)
                 {
                     Thread.Sleep(300);
                     if (serviceProcess != null && serviceProcess.HasExited)
                     {
                         break;
                     }
-                    if (PingMatches(port, dataDir))
-                    {
-                        break;
-                    }
+                    ready = PingAvailable(port);
+                }
+
+                if (!ready)
+                {
+                    string detail = serviceProcess != null && serviceProcess.HasExited
+                        ? "\n\n服务进程已退出，退出代码：" + serviceProcess.ExitCode
+                        : "\n\n首次启动通常需要几秒，请检查安全软件是否拦截了影音库服务。";
+                    MessageBox.Show(
+                        "影音库服务没有及时启动。" + detail,
+                        "影音库网页版",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Error
+                    );
+                    return;
                 }
             }
 
-            if (!PingMatches(port, dataDir))
+            if (!PingAvailable(port))
             {
                 string detail = serviceProcess != null && serviceProcess.HasExited
                     ? "\n\n服务进程已退出，退出代码：" + serviceProcess.ExitCode
@@ -110,6 +122,26 @@ namespace MediaVaultWebLauncher
             {
                 UseShellExecute = true,
             });
+        }
+
+        private static bool PingAvailable(int port)
+        {
+            try
+            {
+                using (WebClient client = new WebClient())
+                {
+                    client.Proxy = null;
+                    string raw = client.DownloadString(
+                        "http://127.0.0.1:" + port + "/api/ping"
+                    );
+                    return raw.Contains("\"app\":\"media-vault\"")
+                        || raw.Contains("\"app\": \"media-vault\"");
+                }
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         private static int FindAvailablePort()
