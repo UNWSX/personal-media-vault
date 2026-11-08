@@ -560,9 +560,15 @@ def read_note(path: Path, vault: Path) -> dict | None:
 
 class Library:
     def __init__(self, vault: Path, data_dir: Path | None = None):
-        self.vault = vault
-        self.data_dir = data_dir or (vault / ".media-app")
-        self.media_root = vault / MEDIA_DIR_NAME
+        # Canonicalize once so Windows 8.3 aliases and long paths compare
+        # consistently when files discovered below the root are read back.
+        self.vault = Path(vault).resolve()
+        self.data_dir = (
+            Path(data_dir).resolve()
+            if data_dir is not None
+            else self.vault / ".media-app"
+        )
+        self.media_root = self.vault / MEDIA_DIR_NAME
         self.lock = threading.RLock()  # snapshot() 里会重入 load()
         self.create_lock = threading.RLock()
         self._path_locks: dict[str, threading.RLock] = {}

@@ -31,6 +31,12 @@ class PhaseOneSafetyTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def test_library_canonicalizes_windows_style_alias_root(self):
+        alias = self.vault / "child" / ".."
+        library = server.Library(alias)
+        self.assertEqual(library.vault, self.vault.resolve())
+        self.assertEqual(library.media_root, self.vault.resolve() / "02-电影阅读")
+
     def write_note(self, name="sample.md", *, newline="\n", final_newline=True):
         text = (
             "---\n"
