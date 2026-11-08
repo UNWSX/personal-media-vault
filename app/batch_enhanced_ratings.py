@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 import time
 import uuid
 from datetime import datetime
@@ -843,17 +844,18 @@ def build_plan(
             entry["updates"]["metacriticScore"] = entry["metacriticLookup"]["score"]
         entries.append(entry)
         save_cache()
-        print(
-            "[%d/%d] %s season=%s updates=%s"
-            % (
-                index,
-                len(relevant),
-                item.get("title") or item["path"],
-                season or "-",
-                ",".join(sorted(entry["updates"])) or "none",
-            ),
-            flush=True,
-        )
+        if sys.stdout is not None:
+            print(
+                "[%d/%d] %s season=%s updates=%s"
+                % (
+                    index,
+                    len(relevant),
+                    item.get("title") or item["path"],
+                    season or "-",
+                    ",".join(sorted(entry["updates"])) or "none",
+                ),
+                flush=True,
+            )
 
     stats = {
         "relevant": len(relevant),

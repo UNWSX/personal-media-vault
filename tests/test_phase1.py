@@ -5,6 +5,7 @@ import tempfile
 import unittest
 import json
 import os
+import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
@@ -673,6 +674,33 @@ class PhaseOneSafetyTests(unittest.TestCase):
             server.data_directory_for_vault(standalone),
             standalone / ".media-app",
         )
+
+    def test_entrypoint_aliases_server_module_for_lazy_imports(self):
+        code = """
+import types
+import sys
+from pathlib import Path
+app = Path(%r)
+sys.path.insert(0, str(app))
+source = (app / "server.py").read_text(encoding="utf-8")
+source = source.rsplit('\\nif __name__ == "__main__":', 1)[0]
+module = types.ModuleType("__main__")
+module.__file__ = str(app / "server.py")
+sys.modules["__main__"] = module
+exec(compile(source, module.__file__, "exec"), module.__dict__)
+alias = sys.modules.get("server")
+assert alias is module
+"""
+        code = code % str(APP_DIR)
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=10,
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_http_servers_use_exclusive_ports(self):
         first, first_port = server.bind_http_server(18100)

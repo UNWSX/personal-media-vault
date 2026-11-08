@@ -69,6 +69,12 @@ from douban_auth import (
     save_session as save_douban_session,
 )
 
+# PyInstaller runs this file as __main__. Lazy imports such as the batch
+# rating engine import `server`; alias both names to one module so they do
+# not load a second copy with a different media-directory state.
+if __name__ == "__main__":
+    sys.modules["server"] = sys.modules[__name__]
+
 APP_ID = "media-vault"
 APP_VERSION = "2.5.18"
 APP_PROTOCOL_VERSION = 1
@@ -1508,6 +1514,24 @@ def auto_lookup_external_ratings(
         ),
         None,
     )
+    if entry is None:
+        target_lib.log.event(
+            "rating_rule_no_entry",
+            level="warning",
+            path=rel,
+            planEntries=len(plan.get("entries", [])),
+        )
+        return {}
+    if not entry.get("updates"):
+        target_lib.log.event(
+            "rating_rule_no_update",
+            level="warning",
+            path=rel,
+            imdbStatus=(entry.get("imdbLookup") or {}).get("status"),
+            rottenStatus=(entry.get("rottenLookup") or {}).get("status"),
+            metacriticStatus=(entry.get("metacriticLookup") or {}).get("status"),
+            bangumiStatus=(entry.get("bangumiLookup") or {}).get("status"),
+        )
     return dict((entry or {}).get("updates") or {})
 
 
