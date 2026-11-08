@@ -10,6 +10,13 @@
 > 第三方海报、简介、评分数据库或商标。详见
 > [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。
 
+发布包根目录提供两个明确入口：
+
+- `双击启动影音库.exe`：启动桌面窗口版。
+- `打开本地网页版.exe`：启动 `影音库服务.exe` 并自动用默认浏览器打开。
+
+运行文件和 DLL 收在“程序”目录，媒体数据放在“数据”目录。
+
 当前源码与安装包版本：`2.5.17`。
 
 GitHub：<https://github.com/UNWSX/personal-media-vault>

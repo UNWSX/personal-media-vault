@@ -26,3 +26,5 @@
   - Obsidian 修复包把批量工具统一放进“工具”目录。
 - `launcher/Launcher.cs`
   - 新增无控制台窗口的小型启动器，从根目录启动“程序”内的主应用。
+- `launcher/WebLauncher.cs`
+  - 新增本地网页版启动器，自动启动服务并打开默认浏览器。
