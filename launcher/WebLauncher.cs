@@ -54,7 +54,7 @@ namespace MediaVaultWebLauncher
                 {
                     serviceProcess = Process.Start(new ProcessStartInfo(service)
                     {
-                        Arguments = "--port " + port + " --no-browser"
+                        Arguments = "--port " + port + " --no-browser --web-mode"
                             + " --vault \"" + dataDir.Replace("\"", "") + "\"",
                         WorkingDirectory = appDir,
                         UseShellExecute = false,

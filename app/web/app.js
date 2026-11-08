@@ -425,7 +425,21 @@
 
   /* ---------------- 启动 ---------------- */
   bindShellLifecycle();
+  bindWebServiceLifecycle();
   init();
+
+  function bindWebServiceLifecycle() {
+    const ping = () => {
+      fetch("/api/web-activity", { cache: "no-store" }).catch(() => {});
+    };
+    ping();
+    setInterval(ping, 5000);
+    window.addEventListener("pageshow", ping);
+    window.addEventListener("pagehide", () => {
+      const body = new Blob(["{}"], { type: "application/json" });
+      navigator.sendBeacon("/api/web-detach", body);
+    });
+  }
 
   async function init() {
     loadUI();

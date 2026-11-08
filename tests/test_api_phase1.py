@@ -53,6 +53,7 @@ class PhaseOneApiTests(unittest.TestCase):
         self.httpd.shutdown()
         self.httpd.server_close()
         self.thread.join(timeout=2)
+        server._WEB_DETACH_DEADLINE = None
         self.temp.cleanup()
 
     def request(self, path, payload=None):
@@ -108,6 +109,17 @@ class PhaseOneApiTests(unittest.TestCase):
         self.assertEqual(status, 409)
         self.assertTrue(conflict["conflict"])
         self.assertNotIn("comment:", (self.vault / "02-电影阅读" / "movie" / "api.md").read_text(encoding="utf-8"))
+
+    def test_web_activity_and_detach_are_recorded(self):
+        status, activity = self.request("/api/web-activity")
+        self.assertEqual(status, 200)
+        self.assertTrue(activity["ok"])
+        self.assertIsNone(server._WEB_DETACH_DEADLINE)
+
+        status, detached = self.request("/api/web-detach", {})
+        self.assertEqual(status, 200)
+        self.assertTrue(detached["ok"])
+        self.assertIsNotNone(server._WEB_DETACH_DEADLINE)
 
     def test_progress_and_rating_compatibility_updates(self):
         _, library = self.request("/api/library")

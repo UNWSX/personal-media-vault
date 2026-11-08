@@ -78,6 +78,42 @@ _RATING_WORKER_THREAD: threading.Thread | None = None
 _RATING_WORKER_STOP = threading.Event()
 _RATING_WORKER_WAKE = threading.Event()
 _ACCESS_RESTRICTED_HOSTS: set[str] = set()
+WEB_MODE = False
+_WEB_ACTIVITY_LOCK = threading.Lock()
+_WEB_LAST_ACTIVITY = time.monotonic()
+_WEB_DETACH_DEADLINE: float | None = None
+WEB_CLOSE_GRACE_SECONDS = 5.0
+WEB_ORPHAN_TIMEOUT_SECONDS = 180.0
+
+
+def _record_web_activity() -> None:
+    global _WEB_LAST_ACTIVITY, _WEB_DETACH_DEADLINE
+    with _WEB_ACTIVITY_LOCK:
+        _WEB_LAST_ACTIVITY = time.monotonic()
+        _WEB_DETACH_DEADLINE = None
+
+
+def _record_web_detach() -> None:
+    global _WEB_DETACH_DEADLINE
+    with _WEB_ACTIVITY_LOCK:
+        _WEB_DETACH_DEADLINE = time.monotonic() + WEB_CLOSE_GRACE_SECONDS
+
+
+def _web_watchdog(httpd) -> None:
+    while True:
+        time.sleep(1.0)
+        with _WEB_ACTIVITY_LOCK:
+            now = time.monotonic()
+            should_stop = (
+                _WEB_DETACH_DEADLINE is not None
+                and now >= _WEB_DETACH_DEADLINE
+            ) or (
+                _WEB_DETACH_DEADLINE is None
+                and now - _WEB_LAST_ACTIVITY >= WEB_ORPHAN_TIMEOUT_SECONDS
+            )
+        if should_stop:
+            httpd.shutdown()
+            return
 
 
 class UpstreamAccessRestricted(RuntimeError):
@@ -4763,6 +4799,10 @@ class Handler(BaseHTTPRequestHandler):
                 "vaultRoot": str(LIB.vault.resolve()) if LIB is not None else "",
             })
 
+        if route == "/api/web-activity":
+            _record_web_activity()
+            return self._json({"ok": True})
+
         return self._error("not found", 404)
 
     def do_POST(self):
@@ -4773,6 +4813,7 @@ class Handler(BaseHTTPRequestHandler):
             "/api/item", "/api/create", "/api/import", "/api/fix-image",
             "/api/quit", "/api/delete", "/api/upgrade-games", "/api/backup",
             "/api/retry-ratings", "/api/douban/session", "/api/douban/logout",
+            "/api/web-detach",
         ):
             return self._error("not found", 404)
         try:
@@ -4857,6 +4898,10 @@ class Handler(BaseHTTPRequestHandler):
                     "attachmentMoved": bool(result.get("attachmentMoved")),
                     "attachmentShared": bool(result.get("attachmentShared")),
                 })
+
+            if parsed.path == "/api/web-detach":
+                _record_web_detach()
+                return self._json({"ok": True})
 
             if parsed.path == "/api/quit":
                 LIB.log.event("app_stopping", source="shell")
@@ -5113,6 +5158,7 @@ def main():
     port_pref = 8765
     vault = None
     open_browser = True
+    web_mode = False
     upgrade_flag = False
     force_covers = False
     for i, a in enumerate(args):
@@ -5122,6 +5168,8 @@ def main():
             port_pref = int(args[i + 1])
         elif a == "--no-browser":
             open_browser = False
+        elif a == "--web-mode":
+            web_mode = True
         elif a == "--upgrade-games":
             upgrade_flag = True
         elif a == "--force-covers":
@@ -5147,7 +5195,17 @@ def main():
                   "写评分 %(score)d，无变化 %(unchanged)d，失败 %(failed)d" % res)
         return
 
+    global WEB_MODE
+    WEB_MODE = web_mode
     httpd, port, url = start_server(vault=vault, port_pref=port_pref)
+    if WEB_MODE:
+        _record_web_activity()
+        threading.Thread(
+            target=_web_watchdog,
+            args=(httpd,),
+            daemon=True,
+            name="web-idle-watchdog",
+        ).start()
     print("  关闭：  在这个窗口按 Ctrl+C")
     if open_browser:
         threading.Timer(0.6, lambda: webbrowser.open(url)).start()

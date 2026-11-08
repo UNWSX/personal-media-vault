@@ -39,8 +39,8 @@ namespace AppHost
                         "影音库", MessageBoxButtons.OK, MessageBoxIcon.Error);
                     return;
                 }
-                ServerPort = port;
             }
+            ServerPort = port;
 
             Application.Run(new MainForm(port));
         }
@@ -199,7 +199,6 @@ namespace AppHost
         internal static void StopServer()
         {
             var process = ServerProcess;
-            if (process == null || process.HasExited) return;
 
             try
             {
@@ -212,6 +211,7 @@ namespace AppHost
             }
             catch { }
 
+            if (process == null || process.HasExited) return;
             if (process.WaitForExit(5000)) return;
             try
             {
