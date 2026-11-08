@@ -1520,6 +1520,36 @@
       actions.appendChild(fix);
     }
 
+    const missingNetworkScores = ["movie", "teleplay"].includes(it.type)
+      && ["imdbScore", "rottenTomatoesScore", "metacriticScore"]
+        .some((field) => it[field] == null);
+    if (missingNetworkScores) {
+      const retryRatings = el("button", "btn", "重新补全网络评分");
+      retryRatings.onclick = async () => {
+        retryRatings.disabled = true;
+        retryRatings.textContent = "已加入补分…";
+        try {
+          await flushComment();
+          if (saveQueues.has(it.path)) await saveQueues.get(it.path);
+          const data = await apiJSON("/api/retry-ratings", {
+            method: "POST",
+            headers: WRITE_HEADERS,
+            body: JSON.stringify({ path: it.path }),
+          });
+          if (!data.ratingJob || data.ratingJob.status === "queue_failed") {
+            throw new Error("评分任务保存失败");
+          }
+          toast("已重新加入网络评分补全任务");
+          watchRatingJob(it.path);
+        } catch (err) {
+          retryRatings.disabled = false;
+          retryRatings.textContent = "重新补全网络评分";
+          toast("补分失败：" + err.message);
+        }
+      };
+      actions.appendChild(retryRatings);
+    }
+
     const clearScore = el("button", "btn", "清除我的评分");
     clearScore.onclick = () => setMyScore(it, null, myWrap, num);
     actions.appendChild(clearScore);
