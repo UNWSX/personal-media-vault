@@ -102,8 +102,9 @@ namespace AppHost
                 }
                 else
                 {
-                    // Standalone editions keep all user media beside the executable.
-                    configured = Path.Combine(AppDir, "数据");
+                    // Standalone editions keep user media beside the top-level
+                    // launcher. The executable itself may live in a 程序 subfolder.
+                    configured = ResolvePortableDataDir();
                 }
             }
 
@@ -111,7 +112,7 @@ namespace AppHost
             try
             {
                 var full = Path.GetFullPath(configured.Trim().Trim('"'));
-                var portableRoot = Path.GetFullPath(Path.Combine(AppDir, "数据"));
+                var portableRoot = ResolvePortableDataDir();
                 return Directory.Exists(Path.Combine(full, ".obsidian"))
                     || string.Equals(
                         full.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
@@ -124,6 +125,30 @@ namespace AppHost
             {
                 return null;
             }
+        }
+
+        private static string ResolvePortableDataDir()
+        {
+            var appDir = AppDir.TrimEnd(
+                Path.DirectorySeparatorChar,
+                Path.AltDirectorySeparatorChar
+            );
+            var parent = Directory.GetParent(appDir)?.FullName;
+            if (!string.IsNullOrEmpty(parent)
+                && string.Equals(
+                    Path.GetFileName(appDir),
+                    "程序",
+                    StringComparison.OrdinalIgnoreCase
+                ))
+            {
+                var siblingData = Path.Combine(parent, "数据");
+                if (Directory.Exists(siblingData))
+                {
+                    return Path.GetFullPath(siblingData);
+                }
+            }
+
+            return Path.GetFullPath(Path.Combine(AppDir, "数据"));
         }
 
         private static bool VaultMatches(JsonElement root, string? expectedVaultRoot)
