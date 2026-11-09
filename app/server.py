@@ -77,7 +77,7 @@ if __name__ == "__main__":
     sys.modules["server"] = sys.modules[__name__]
 
 APP_ID = "media-vault"
-APP_VERSION = "2.5.18.1"
+APP_VERSION = "2.5.19"
 APP_PROTOCOL_VERSION = 1
 APP_INSTANCE_ID = uuid.uuid4().hex
 RATING_QUEUE: RatingJobQueue | None = None
@@ -4748,6 +4748,27 @@ def grab_first_cover(vault: Path, name: str,
     return ""
 
 
+def _douban_detail_media_type(detail: dict, fallback: str) -> str:
+    if fallback == "book":
+        return "book"
+    raw_type = str(detail.get("type") or "").strip().lower()
+    subtype = str(detail.get("subtype") or "").strip().lower()
+    try:
+        episodes = int(detail.get("episodes_count") or 0)
+    except (TypeError, ValueError):
+        episodes = 0
+    if (
+        raw_type in {"tv", "show", "series"}
+        or subtype in {"tv", "show", "series"}
+        or detail.get("is_tv") is True
+        or episodes > 0
+    ):
+        return "teleplay"
+    if fallback in {"movie", "teleplay"}:
+        return "movie"
+    return fallback
+
+
 def fetch_douban_detail(subject_id: str, target_type: str) -> dict:
     """尽力而为地补齐元数据；失败就返回空 dict，不影响主流程。"""
     kind = "book" if target_type == "book" else "movie"
@@ -4779,6 +4800,7 @@ def fetch_douban_detail(subject_id: str, target_type: str) -> dict:
     year = str(d.get("year") or "").strip()
 
     out = {
+        "mediaType": _douban_detail_media_type(d, target_type),
         "title": str(d.get("title") or "").strip(),
         "originalTitle": str(d.get("original_title") or "").strip(),
         "intro": str(d.get("intro") or "").strip(),
@@ -4786,6 +4808,7 @@ def fetch_douban_detail(subject_id: str, target_type: str) -> dict:
         "cover": cover or "",
         "year": year,
         "datePublished": pub,
+        "episodesCount": d.get("episodes_count"),
     }
     if kind == "book":
         out["authors"] = names("author")
@@ -5128,6 +5151,99 @@ def find_existing(lib: "Library", title: str, t: str) -> dict | None:
     return None
 
 
+def find_existing_media(
+    lib: "Library",
+    title: str,
+    preferred_type: str,
+) -> dict | None:
+    if preferred_type not in {"movie", "teleplay"}:
+        return find_existing(lib, title, preferred_type)
+    other_type = "teleplay" if preferred_type == "movie" else "movie"
+    for media_type in (preferred_type, other_type):
+        existing = find_existing(lib, title, media_type)
+        if existing:
+            return existing
+    return None
+
+
+def repair_media_type(
+    lib: "Library",
+    item: dict,
+    target_type: str,
+) -> dict:
+    if target_type not in {"movie", "teleplay"}:
+        raise ValueError("不支持的媒体类型修复")
+    current_type = str(item.get("type") or "").strip().lower()
+    if current_type == target_type:
+        return item
+    rel = normalize_vault_relative_path(str(item["path"]))
+    source = lib._note_target(rel)
+    if not source.is_file():
+        raise ValueError("待修复笔记不存在")
+    target_dir = lib.media_root / target_type
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / source.name
+
+    with lib.create_lock, lib._path_lock(rel):
+        if target.exists():
+            raise NoteWriteError("目标媒体目录已存在同名笔记，已停止自动迁移")
+        raw = source.read_bytes()
+        patch_result = patch_frontmatter(raw, {"type": target_type})
+        if not patch_result.ok:
+            message = "；".join(
+                diagnostic.message for diagnostic in patch_result.diagnostics
+            )
+            raise NoteWriteError("媒体类型修补失败：%s" % message)
+        text, newline, bom = decode_note(patch_result.data)
+        if target_type == "teleplay":
+            text = text.replace("> **🎬 标题**", "> **📺 标题**")
+        else:
+            text = text.replace("> **📺 标题**", "> **🎬 标题**")
+        new_raw = encode_note(text, newline, bom)
+
+        def verify():
+            parsed = read_note(source, lib.vault)
+            if parsed is None or parsed.get("type") != target_type:
+                raise NoteWriteError("媒体类型写入后无法正确解析")
+            if source.read_bytes() != new_raw:
+                raise NoteWriteError("媒体类型写入后内容不一致")
+
+        atomic_write_note(
+            source,
+            new_raw,
+            lib.backup_root,
+            rel,
+            verify,
+            expected_revision=content_revision(raw),
+        )
+        try:
+            os.replace(source, target)
+        except OSError:
+            # The frontmatter is already corrected; a later retry can finish
+            # moving the note without losing user data.
+            lib.log.event(
+                "media_type_repair_move_failed",
+                level="error",
+                path=rel,
+                targetType=target_type,
+            )
+            raise
+        repaired = read_note(target, lib.vault)
+        if repaired is None:
+            os.replace(target, source)
+            raise NoteWriteError("媒体类型迁移后无法读取目标笔记")
+        lib._cache_item(rel, None)
+        lib._cache_item(repaired["path"], repaired)
+        lib.log.event(
+            "media_type_repaired",
+            path=rel,
+            newPath=repaired["path"],
+            fromType=current_type,
+            toType=target_type,
+        )
+        return repaired
+
+
 def import_from_douban(lib: "Library", payload: dict) -> dict:
     global _CDN_FAILS, _CDN_DOWN, _STEAM_FAILS, _STEAM_DOWN, _BGM_FAILS, _BGM_DOWN
     _CDN_FAILS = 0
@@ -5145,10 +5261,41 @@ def import_from_douban(lib: "Library", payload: dict) -> dict:
     if not title:
         raise ValueError("缺少标题")
 
-    existing = find_existing(lib, title, target_type)
+    detail = {}
+    merged_title = clean_title(title)
+    if target_type in {"movie", "teleplay"} and subject_id:
+        detail = fetch_douban_detail(subject_id, target_type)
+        resolved_type = str(detail.get("mediaType") or "").strip().lower()
+        if resolved_type in {"movie", "teleplay"}:
+            target_type = resolved_type
+        merged_title = clean_title(detail.get("title") or title)
+
+    existing = None
+    for candidate_title in (
+        merged_title,
+        clean_title(title),
+        clean_title(str(detail.get("originalTitle") or "")),
+    ):
+        if not candidate_title:
+            continue
+        existing = find_existing_media(lib, candidate_title, target_type)
+        if existing:
+            break
+    media_type_repaired = False
     if existing:
+        if (
+            target_type in {"movie", "teleplay"}
+            and existing.get("type") != target_type
+        ):
+            existing = repair_media_type(lib, existing, target_type)
+            media_type_repaired = True
         queued = _queue_rating_job(lib, existing)
-        return dict(existing, existed=True, ratingJob=queued)
+        return dict(
+            existing,
+            existed=True,
+            mediaTypeRepaired=media_type_repaired,
+            ratingJob=queued,
+        )
 
     # ---- 游戏：解析条目页 + Steam 封面 + Metacritic ----
     if target_type == "game":
@@ -5204,8 +5351,12 @@ def import_from_douban(lib: "Library", payload: dict) -> dict:
         rec["enriched"] = bool(g)
         return rec
 
-    detail = fetch_douban_detail(subject_id, target_type) if subject_id else {}
+    if not detail and subject_id:
+        detail = fetch_douban_detail(subject_id, target_type)
 
+    inferred_type = str(detail.get("mediaType") or "").strip().lower()
+    if inferred_type in {"movie", "teleplay"} and target_type in {"movie", "teleplay"}:
+        target_type = inferred_type
     merged_title = clean_title(detail.get("title") or title)
     year = detail.get("year") or str(payload.get("year") or "").strip()
     date_pub = detail.get("datePublished") or normalize_date(year)

@@ -80,7 +80,7 @@ class PhaseOneApiTests(unittest.TestCase):
         status, ping = self.request("/api/ping")
         self.assertEqual(status, 200)
         self.assertEqual(ping["app"], "media-vault")
-        self.assertEqual(ping["version"], "2.5.18.1")
+        self.assertEqual(ping["version"], "2.5.19")
         self.assertEqual(ping["protocolVersion"], 1)
         self.assertRegex(ping["instanceId"], r"^[0-9a-f]{32}$")
         self.assertEqual(Path(ping["vaultRoot"]), self.vault.resolve())

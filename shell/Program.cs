@@ -16,7 +16,7 @@ namespace AppHost
         internal static Process? ServerProcess;
         private static int ServerPort = PortStart;
         private const string AppId = "media-vault";
-        private const string ExpectedVersion = "2.5.18.1";
+        private const string ExpectedVersion = "2.5.19";
         private const int ExpectedProtocolVersion = 1;
         private const int PortStart = 8765;
         private const int PortEnd = 8775;

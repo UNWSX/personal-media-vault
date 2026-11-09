@@ -2213,11 +2213,13 @@
       if (item.existed) {
         const ratingQueued = item.ratingJob
           && item.ratingJob.status !== "queue_failed";
-        toast(ratingQueued
-          ? `《${item.title}》已存在，已加入后台补分`
-          : item.ratingJob
-            ? `《${item.title}》已存在，但评分任务保存失败`
-          : `《${item.title}》已经在库里了`);
+        toast(item.mediaTypeRepaired
+          ? `《${item.title}》已存在，类型已修正为${item.typeLabel || item.type}`
+          : ratingQueued
+            ? `《${item.title}》已存在，已加入后台补分`
+            : item.ratingJob
+              ? `《${item.title}》已存在，但评分任务保存失败`
+              : `《${item.title}》已经在库里了`);
         if (ratingQueued) watchRatingJob(item.path);
       } else {
         ITEMS.push(item);
