@@ -315,11 +315,26 @@ ROLLBACK <planId>
 
 普通用户从旧版独立包升级到新版时，可使用“影音库数据迁移助手”：
 
+**下载哪个文件**
+
+- 要下载：
+  [`media-vault-data-migration-1.0.0-win-x64.zip`](https://github.com/UNWSX/personal-media-vault/releases/download/v2.5.19/media-vault-data-migration-1.0.0-win-x64.zip)
+- 这是完整迁移程序，解压后双击 `影音库数据迁移助手.exe`。
+- `data-migration-1.0.0-SHA256SUMS.txt` 只用于校验，不是程序。
+- `personal-media-vault-2.5.19-source.zip` 是源代码，不是普通用户下载的程序。
+
+**使用步骤**
+
 1. 先关闭影音库、网页版和 Obsidian。
 2. 选择旧版程序目录或其中的“数据”目录。
 3. 选择新版程序目录或其中的“数据”目录。
 4. 扫描并检查新增、覆盖、跳过和冲突文件。
 5. 确认后执行；程序会先完整备份新版目标目录。
+6. 迁移完成后打开新版影音库，检查媒体、封面和附件。
+
+更换电脑或 Windows 用户时，媒体数据和附件可以迁移，但豆瓣登录态受
+Windows DPAPI 保护，无法跨设备解密。新版影音库会显示未登录，重新登录豆瓣
+即可。
 
 迁移采用合并复制，不删除源目录，也不会删除目标中源数据没有的文件。默认只迁移
 `媒体库` / `02-电影阅读`、`attachments` 和 `.media-app`，跳过锁文件、临时文件
