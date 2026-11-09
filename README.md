@@ -311,6 +311,29 @@ ROLLBACK <planId>
 - Rollback 只恢复当前内容仍等于 Plan 后哈希的文件；用户迁移后编辑会进入 `RESTORE_CONFLICT`。
 - 全局锁防止同一 Vault 并发 Apply。
 
+## 独立版升级数据迁移助手
+
+普通用户从旧版独立包升级到新版时，可使用“影音库数据迁移助手”：
+
+1. 先关闭影音库、网页版和 Obsidian。
+2. 选择旧版程序目录或其中的“数据”目录。
+3. 选择新版程序目录或其中的“数据”目录。
+4. 扫描并检查新增、覆盖、跳过和冲突文件。
+5. 确认后执行；程序会先完整备份新版目标目录。
+
+迁移采用合并复制，不删除源目录，也不会删除目标中源数据没有的文件。默认只迁移
+`媒体库` / `02-电影阅读`、`attachments` 和 `.media-app`，跳过锁文件、临时文件
+与符号链接。迁移结束后会在目标 `.media-app/migration/data-migrations/`
+生成 JSON 和 Markdown 报告。
+
+源码入口：
+
+```powershell
+python app\data_migration_gui.py
+```
+
+详细说明见 [`docs/data-migration-assistant.md`](docs/data-migration-assistant.md)。
+
 详细说明：
 
 - [`docs/stage2-2.4/README.md`](docs/stage2-2.4/README.md)
