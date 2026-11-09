@@ -1,7 +1,7 @@
 # 个人影音库
 
-一个本地优先的个人影音库应用：**深色封面墙 + 豆瓣搜索导入 + 多来源评分**。
-支持直接管理 Obsidian Vault 中的 Markdown，也提供不需要 Obsidian 的独立分享版。
+一个本地优先的个人影音库应用：**深/浅双色封面墙 + 豆瓣搜索导入 + 多来源评分**。
+支持直接管理 Obsidian Vault 中的 Markdown，也提供不需要 Obsidian 的Winodws独立版。
 媒体笔记始终是正式数据源，程序读写 front matter 字段，并尽量保持正文与其它字段不变。
 
 > **使用边界**：本项目是非官方的本地工具，与豆瓣、IMDb、烂番茄、
@@ -19,11 +19,11 @@
 
 ## 下载哪个版本
 
-- **普通用户、第一次使用、没有 Obsidian：请下载“Windows 独立版”。**
-- **已经拥有 Obsidian Vault，并要把程序放进 `.media-app`：才下载“Obsidian 修复版”。**
+- **普通用户、第一次使用、没有 Obsidian：请下载“Windows 版”。**
+- **已经拥有 Obsidian，想要和Obsidian联动，请下载“Obsidian 版”。**
 - **开发者：使用 GitHub 自动生成的 Source code 压缩包。**
 
-Obsidian 修复版不是可供普通用户直接双击体验的完整桌面安装包。
+Obsidian 版不是可供普通用户直接双击体验的完整桌面安装包。
 
 当前源码与安装包版本：`2.5.19`。
 
@@ -42,6 +42,50 @@ GitHub：<https://github.com/UNWSX/personal-media-vault>
 重试同一条路径，避免单台主机反爬导致导入失败；每次请求仍会重新校验白名单、
 解析到公网 IP 并固定连接目标。外部站点未收录或暂时无法访问时，只保留已有字段
 并自动重试，不生成猜测分数。
+
+## 独立版升级数据迁移助手
+
+普通用户从旧版独立包升级到新版时，可使用“影音库数据迁移助手”：
+
+**下载哪个文件**
+
+- 要下载：
+  [`media-vault-data-migration-1.0.0-win-x64.zip`](https://github.com/UNWSX/personal-media-vault/releases/download/v2.5.19/media-vault-data-migration-1.0.0-win-x64.zip)
+- 这是完整迁移程序，解压后双击 `影音库数据迁移助手.exe`。
+- `data-migration-1.0.0-SHA256SUMS.txt` 只用于校验，不是程序。
+- `personal-media-vault-2.5.19-source.zip` 是源代码，不是普通用户下载的程序。
+
+**使用步骤**
+
+1. 先关闭影音库、网页版和 Obsidian。
+2. 选择旧版程序目录或其中的“数据”目录。
+3. 选择新版程序目录或其中的“数据”目录。
+4. 扫描并检查新增、覆盖、跳过和冲突文件。
+5. 确认后执行；程序会先完整备份新版目标目录。
+6. 迁移完成后打开新版影音库，检查媒体、封面和附件。
+
+更换电脑或 Windows 用户时，媒体数据和附件可以迁移，但豆瓣登录态受
+Windows DPAPI 保护，无法跨设备解密。新版影音库会显示未登录，重新登录豆瓣
+即可。
+
+迁移采用合并复制，不删除源目录，也不会删除目标中源数据没有的文件。默认只迁移
+`媒体库` / `02-电影阅读`、`attachments` 和 `.media-app`，跳过锁文件、临时文件
+与符号链接。迁移结束后会在目标 `.media-app/migration/data-migrations/`
+生成 JSON 和 Markdown 报告。
+
+源码入口：
+
+```powershell
+python app\data_migration_gui.py
+```
+
+详细说明见 [`docs/data-migration-assistant.md`](docs/data-migration-assistant.md)。
+
+详细说明：
+
+- [`docs/stage2-2.4/README.md`](docs/stage2-2.4/README.md)
+- [`docs/stage2-2.5/README.md`](docs/stage2-2.5/README.md)
+- [`docs/stage2-2.5/operations.md`](docs/stage2-2.5/operations.md)
 
 ---
 
@@ -310,50 +354,6 @@ ROLLBACK <planId>
 - 单篇失败不停止后续可安全处理的文件。
 - Rollback 只恢复当前内容仍等于 Plan 后哈希的文件；用户迁移后编辑会进入 `RESTORE_CONFLICT`。
 - 全局锁防止同一 Vault 并发 Apply。
-
-## 独立版升级数据迁移助手
-
-普通用户从旧版独立包升级到新版时，可使用“影音库数据迁移助手”：
-
-**下载哪个文件**
-
-- 要下载：
-  [`media-vault-data-migration-1.0.0-win-x64.zip`](https://github.com/UNWSX/personal-media-vault/releases/download/v2.5.19/media-vault-data-migration-1.0.0-win-x64.zip)
-- 这是完整迁移程序，解压后双击 `影音库数据迁移助手.exe`。
-- `data-migration-1.0.0-SHA256SUMS.txt` 只用于校验，不是程序。
-- `personal-media-vault-2.5.19-source.zip` 是源代码，不是普通用户下载的程序。
-
-**使用步骤**
-
-1. 先关闭影音库、网页版和 Obsidian。
-2. 选择旧版程序目录或其中的“数据”目录。
-3. 选择新版程序目录或其中的“数据”目录。
-4. 扫描并检查新增、覆盖、跳过和冲突文件。
-5. 确认后执行；程序会先完整备份新版目标目录。
-6. 迁移完成后打开新版影音库，检查媒体、封面和附件。
-
-更换电脑或 Windows 用户时，媒体数据和附件可以迁移，但豆瓣登录态受
-Windows DPAPI 保护，无法跨设备解密。新版影音库会显示未登录，重新登录豆瓣
-即可。
-
-迁移采用合并复制，不删除源目录，也不会删除目标中源数据没有的文件。默认只迁移
-`媒体库` / `02-电影阅读`、`attachments` 和 `.media-app`，跳过锁文件、临时文件
-与符号链接。迁移结束后会在目标 `.media-app/migration/data-migrations/`
-生成 JSON 和 Markdown 报告。
-
-源码入口：
-
-```powershell
-python app\data_migration_gui.py
-```
-
-详细说明见 [`docs/data-migration-assistant.md`](docs/data-migration-assistant.md)。
-
-详细说明：
-
-- [`docs/stage2-2.4/README.md`](docs/stage2-2.4/README.md)
-- [`docs/stage2-2.5/README.md`](docs/stage2-2.5/README.md)
-- [`docs/stage2-2.5/operations.md`](docs/stage2-2.5/operations.md)
 
 ## 2026-11-07 UI 回归版
 
