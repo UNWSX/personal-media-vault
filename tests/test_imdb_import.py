@@ -82,6 +82,65 @@ class IMDbLookupTests(unittest.TestCase):
         self.assertEqual(result["status"], "no_match")
         detail.assert_not_called()
 
+    def test_popular_exact_candidate_disambiguates_same_title_and_year(self):
+        suggestions = {
+            "d": [
+                {"id": "tt1000001", "l": "Same Name", "y": 2026, "qid": "movie", "rank": 8},
+                {"id": "tt1000002", "l": "Same Name", "y": 2026, "qid": "movie", "rank": 700},
+                {"id": "tt1000003", "l": "Same Name", "y": 2026, "qid": "movie", "rank": 30000},
+            ]
+        }
+        details = {
+            "tt1000001": {
+                "titleText": {"text": "Same Name"},
+                "releaseYear": {"year": 2026},
+                "titleType": {"id": "movie"},
+                "ratingsSummary": {"aggregateRating": 8.4},
+            },
+            "tt1000002": {
+                "titleText": {"text": "Same Name"},
+                "releaseYear": {"year": 2026},
+                "titleType": {"id": "movie"},
+                "ratingsSummary": {"aggregateRating": 2.1},
+            },
+            "tt1000003": {
+                "titleText": {"text": "Same Name"},
+                "releaseYear": {"year": 2026},
+                "titleType": {"id": "movie"},
+                "ratingsSummary": {"aggregateRating": 3.2},
+            },
+        }
+        with mock.patch.object(
+            server, "_imdb_suggestion_json", return_value=suggestions
+        ), mock.patch.object(
+            server,
+            "_imdb_graphql_title",
+            side_effect=lambda imdb_id: details[imdb_id],
+        ):
+            result = server.lookup_imdb("Same Name", "movie", 2026)
+        self.assertEqual(result["status"], "matched")
+        self.assertEqual(result["candidate"]["imdbId"], "tt1000001")
+        self.assertEqual(result["matchMode"], "popularity_rank")
+
+    def test_close_popularity_ranks_remain_ambiguous(self):
+        suggestions = {
+            "d": [
+                {"id": "tt2000001", "l": "Close Match", "y": 2026, "qid": "movie", "rank": 100},
+                {"id": "tt2000002", "l": "Close Match", "y": 2026, "qid": "movie", "rank": 120},
+            ]
+        }
+        detail = {
+            "titleText": {"text": "Close Match"},
+            "releaseYear": {"year": 2026},
+            "titleType": {"id": "movie"},
+            "ratingsSummary": {"aggregateRating": 7.0},
+        }
+        with mock.patch.object(
+            server, "_imdb_suggestion_json", return_value=suggestions
+        ), mock.patch.object(server, "_imdb_graphql_title", return_value=detail):
+            result = server.lookup_imdb("Close Match", "movie", 2026)
+        self.assertEqual(result["status"], "ambiguous")
+
     def test_tv_season_uses_episode_rating_average(self):
         suggestions = {
             "d": [{

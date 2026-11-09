@@ -80,7 +80,7 @@ class PhaseOneApiTests(unittest.TestCase):
         status, ping = self.request("/api/ping")
         self.assertEqual(status, 200)
         self.assertEqual(ping["app"], "media-vault")
-        self.assertEqual(ping["version"], "2.5.18")
+        self.assertEqual(ping["version"], "2.5.18.1")
         self.assertEqual(ping["protocolVersion"], 1)
         self.assertRegex(ping["instanceId"], r"^[0-9a-f]{32}$")
         self.assertEqual(Path(ping["vaultRoot"]), self.vault.resolve())
@@ -412,32 +412,62 @@ class PhaseOneApiTests(unittest.TestCase):
 
 
 class MetadataSearchTests(unittest.TestCase):
-    def test_auto_rating_delegates_to_batch_rule_engine(self):
+    def test_auto_rating_runs_without_batch_rule_engine(self):
         with tempfile.TemporaryDirectory() as temp:
             vault = Path(temp)
+            folder = vault / "02-电影阅读" / "teleplay"
+            folder.mkdir(parents=True)
+            rel = "02-电影阅读/teleplay/测试条目.md"
+            (vault / rel).write_text(
+                "---\n"
+                "title: 测试条目\n"
+                "originalTitle: Test Entry\n"
+                "type: teleplay\n"
+                "datePublished: 2024-02-01\n"
+                "status: false\n"
+                "---\n",
+                encoding="utf-8",
+            )
             lib = server.Library(vault)
             payload = {
-                "_itemPath": "02-电影阅读/teleplay/测试条目.md",
+                "_itemPath": rel,
                 "type": "teleplay",
                 "title": "测试条目",
             }
-            plan = {
-                "entries": [{
-                    "relativePath": payload["_itemPath"],
-                    "updates": {
-                        "imdbScore": 8.2,
-                        "rottenTomatoesScore": 91,
-                        "metacriticScore": 80,
-                    },
-                }],
-            }
-            with mock.patch.object(batch, "build_plan", return_value=plan) as build:
+            with (
+                mock.patch.object(
+                    server,
+                    "lookup_wikidata",
+                    return_value={"status": "no_match"},
+                ),
+                mock.patch.object(
+                    server,
+                    "lookup_imdb",
+                    return_value={"status": "matched", "score": 8.2},
+                ),
+                mock.patch.object(
+                    server,
+                    "lookup_rotten_tomatoes",
+                    return_value={"status": "matched", "score": 91},
+                ),
+                mock.patch.object(
+                    server,
+                    "lookup_metacritic",
+                    return_value={"status": "matched", "score": 80},
+                ),
+                mock.patch.object(
+                    batch,
+                    "build_plan",
+                    side_effect=AssertionError("batch tool must not be called"),
+                ) as build,
+            ):
                 updates = server.auto_lookup_external_ratings(payload, lib=lib)
-        self.assertEqual(updates, plan["entries"][0]["updates"])
-        kwargs = build.call_args.kwargs
-        self.assertEqual(kwargs["only_path"], payload["_itemPath"])
-        self.assertEqual(kwargs["limit"], 1)
-        self.assertEqual(kwargs["wait_seconds"], 0)
+        self.assertEqual(updates, {
+            "imdbScore": 8.2,
+            "rottenTomatoesScore": 91,
+            "metacriticScore": 80,
+        })
+        build.assert_not_called()
 
     def test_douban_plugin_cookie_is_not_read_without_explicit_import(self):
         with tempfile.TemporaryDirectory() as temp:

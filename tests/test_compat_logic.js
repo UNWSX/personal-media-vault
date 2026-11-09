@@ -87,6 +87,21 @@ assert.strictEqual(
   seriesSortKey({ type: "teleplay", title: "无职转生Ⅱ到了异世界就拿出真本事Part2" }),
 );
 assert.strictEqual(
+  seriesSortKey({ title: "007：幽灵党" }),
+  seriesSortKey({ title: "007：无暇赴死" }),
+);
+const bondItems = [
+  { title: "007：无暇赴死", date: "2021-09-30" },
+  { title: "007：幽灵党", date: "2015-10-26" },
+].sort((a, b) => {
+  const group = seriesSortKey(a).localeCompare(seriesSortKey(b));
+  return group || a.date.localeCompare(b.date);
+});
+assert.deepStrictEqual(
+  bondItems.map((item) => item.title),
+  ["007：幽灵党", "007：无暇赴死"],
+);
+assert.strictEqual(
   networkSortScore({ imdbScore: 8.2, doubanScore: 9.5 }),
   82,
 );

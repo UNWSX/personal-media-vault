@@ -39,6 +39,7 @@ from pathlib import Path
 from activity_log import ActivityLog
 from frontmatter_patch import parse_frontmatter, patch_frontmatter
 from media_seasons import extract_season
+from rating_aliases import resolve_imdb_override, resolve_metacritic_title
 from rating_queue import RatingJobQueue
 from media_compat import (
     PROGRESS_BY_TYPE,
@@ -76,14 +77,16 @@ if __name__ == "__main__":
     sys.modules["server"] = sys.modules[__name__]
 
 APP_ID = "media-vault"
-APP_VERSION = "2.5.18"
+APP_VERSION = "2.5.18.1"
 APP_PROTOCOL_VERSION = 1
 APP_INSTANCE_ID = uuid.uuid4().hex
 RATING_QUEUE: RatingJobQueue | None = None
 _RATING_WORKER_THREAD: threading.Thread | None = None
 _RATING_WORKER_STOP = threading.Event()
 _RATING_WORKER_WAKE = threading.Event()
-_ACCESS_RESTRICTED_HOSTS: set[str] = set()
+_ACCESS_RESTRICTED_HOSTS: dict[str, float] = {}
+ACCESS_RESTRICTION_COOLDOWN_SECONDS = 3600.0
+_AUTO_RATING_CACHE_LOCK = threading.RLock()
 WEB_MODE = False
 _WEB_ACTIVITY_LOCK = threading.Lock()
 _WEB_LAST_ACTIVITY = time.monotonic()
@@ -138,14 +141,21 @@ def _raise_for_access_restriction(exc: BaseException, url: str) -> None:
         return
     host = (urllib.parse.urlsplit(url).hostname or "").lower()
     if host:
-        _ACCESS_RESTRICTED_HOSTS.add(host)
+        _ACCESS_RESTRICTED_HOSTS[host] = time.time() + ACCESS_RESTRICTION_COOLDOWN_SECONDS
     raise UpstreamAccessRestricted(host or "unknown", exc.code) from exc
 
 
 def _assert_host_not_restricted(url: str) -> None:
     host = (urllib.parse.urlsplit(url).hostname or "").lower()
-    if host and host in _ACCESS_RESTRICTED_HOSTS:
-        raise UpstreamAccessRestricted(host, 403)
+    if not host:
+        return
+    retry_at = _ACCESS_RESTRICTED_HOSTS.get(host)
+    if retry_at is None:
+        return
+    if time.time() >= retry_at:
+        _ACCESS_RESTRICTED_HOSTS.pop(host, None)
+        return
+    raise UpstreamAccessRestricted(host, 403)
 
 def _app_dir() -> Path:
     # 打包成 exe 后，代码在临时解压目录里，但「库路径」要以 exe 所在目录为准
@@ -1485,11 +1495,488 @@ def _configured_https_proxy() -> str | None:
     return value
 
 
+def _auto_rating_dedupe(values) -> list[str]:
+    out = []
+    seen = set()
+    for value in values:
+        text = str(value or "").strip()
+        key = text.casefold()
+        if text and key not in seen:
+            seen.add(key)
+            out.append(text)
+    return out
+
+
+def _auto_rating_cached_json(path: Path) -> dict:
+    if not path.is_file():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _auto_rating_write_cache(path: Path, state: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_name("%s.%s.tmp" % (path.name, uuid.uuid4().hex))
+    try:
+        temp.write_text(
+            json.dumps(
+                {"cacheFormatVersion": 2, **state},
+                ensure_ascii=False,
+                indent=2,
+            ) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temp, path)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def _auto_rating_cache_state(path: Path) -> dict:
+    state = {
+        "imdb": {},
+        "rotten": {},
+        "bangumi": {},
+        "anilist": {},
+        "wikidata": {},
+        "metacritic": {},
+        "doubanTitles": {},
+    }
+    stored = _auto_rating_cached_json(path)
+    for key in state:
+        if isinstance(stored.get(key), dict):
+            state[key] = stored[key]
+    return state
+
+
+def _auto_rating_frontmatter(lib: "Library", rel: str) -> dict:
+    if not rel:
+        return {}
+    try:
+        parsed = parse_frontmatter(lib._note_target(rel).read_bytes())
+    except (OSError, ValueError):
+        return {}
+    if not parsed.ok:
+        return {}
+    return {key: field.value for key, field in parsed.fields.items()}
+
+
+def _auto_rating_anime(item: dict) -> bool:
+    tags = " ".join(str(tag).casefold() for tag in item.get("tags", []))
+    return any(marker in tags for marker in ("动画", "动漫", "anime", "アニメ"))
+
+
+def _parse_auto_original_title(value: str) -> str:
+    text = str(value or "").strip()
+    marker = "原名:"
+    if marker in text:
+        text = text.split(marker, 1)[1]
+        text = text.split(" / ", 1)[0]
+    return text.strip()
+
+
+def _embedded_latin_title(value: str) -> str:
+    text = str(value or "")
+    candidates = []
+    for match in re.finditer(r"[（(]([^（）()]{2,120})[）)]", text):
+        candidate = match.group(1).strip()
+        if re.search(r"[A-Za-z]", candidate):
+            candidates.append(candidate)
+    return max(candidates, key=len, default="")
+
+
+def _auto_douban_title_candidate(
+    lib: "Library",
+    item: dict,
+    fm: dict,
+    state: dict,
+    cache_path: Path,
+) -> tuple[str, str]:
+    original = str(
+        fm.get("originalTitle") or item.get("originalTitle") or ""
+    ).strip()
+    if original:
+        return original, "existing_original_title"
+
+    subject_id = str(fm.get("doubanId") or fm.get("id") or "").strip()
+    cache_key = "%s|%s|%s" % (
+        subject_id,
+        item.get("type") or "",
+        item.get("title") or "",
+    )
+    cached = state["doubanTitles"].get(cache_key)
+    if isinstance(cached, dict) and cached.get("title"):
+        return str(cached["title"]), str(cached.get("source") or "cached")
+
+    # A saved Douban subject ID is a stronger identity than a title search.
+    if subject_id:
+        for attempt in range(2):
+            detail = fetch_douban_detail(subject_id, str(item.get("type") or ""))
+            resolved = str(detail.get("originalTitle") or "").strip()
+            if resolved:
+                state["doubanTitles"][cache_key] = {
+                    "title": resolved,
+                    "source": "douban_detail",
+                }
+                _auto_rating_write_cache(cache_path, state)
+                return resolved, "douban_detail"
+            if attempt == 0:
+                time.sleep(0.4)
+
+    for attempt in range(2):
+        try:
+            results = search_douban(
+                str(item.get("title") or ""),
+                str(item.get("type") or ""),
+            )
+        except Exception:
+            results = []
+        for result in results if isinstance(results, list) else []:
+            if subject_id and str(result.get("id") or "") != subject_id:
+                continue
+            if (
+                not subject_id
+                and item.get("year")
+                and str(result.get("year") or "")[:4] != str(item["year"])
+            ):
+                continue
+            subtitle = _parse_auto_original_title(result.get("sub"))
+            if subtitle:
+                state["doubanTitles"][cache_key] = {
+                    "title": subtitle,
+                    "source": "douban_search",
+                }
+                _auto_rating_write_cache(cache_path, state)
+                return subtitle, "douban_search"
+        if attempt == 0:
+            time.sleep(0.4)
+
+    embedded = _embedded_latin_title(str(item.get("title") or ""))
+    if embedded:
+        state["doubanTitles"][cache_key] = {
+            "title": embedded,
+            "source": "embedded_title",
+        }
+        _auto_rating_write_cache(cache_path, state)
+        return embedded, "embedded_title"
+    return "", ""
+
+
+def _auto_movie_title_aliases(
+    item: dict,
+    state: dict,
+    cache_path: Path,
+    proxy: str | None,
+) -> list[str]:
+    if item.get("type") != "movie":
+        return []
+    title = str(item.get("title") or "")
+    match = re.search(r"^(.*?)(?:大电影|剧场版|劇場版)", title)
+    if not match:
+        return []
+    base_title = match.group(1).strip(" ：:")
+    if not base_title:
+        return []
+    cache_key = "parent|%s" % base_title
+    parent = state["wikidata"].get(cache_key)
+    if not isinstance(parent, dict):
+        parent = lookup_wikidata(base_title, "teleplay", None, proxy=proxy)
+        state["wikidata"][cache_key] = parent
+        _auto_rating_write_cache(cache_path, state)
+    english = str((parent.get("candidate") or {}).get("englishTitle") or "").strip()
+    if not english:
+        return []
+    try:
+        payload = _rt_request_json(english)
+    except Exception:
+        return []
+    aliases = []
+    for hit in payload.get("hits", []) if isinstance(payload, dict) else []:
+        if str(hit.get("type") or "").casefold() != "movie":
+            continue
+        if str(hit.get("releaseYear") or "") != str(item.get("year") or ""):
+            continue
+        candidate = str(hit.get("title") or "").strip()
+        if candidate:
+            aliases.append(candidate)
+    return _auto_rating_dedupe(aliases)
+
+
+def _auto_rating_queries(
+    lib: "Library",
+    item: dict,
+    fm: dict,
+    state: dict,
+    cache_path: Path,
+    proxy: str | None,
+    season: int | None,
+    need_external: bool,
+) -> tuple[list[tuple[str, str]], dict | None]:
+    primary = ""
+    title_source = ""
+    if need_external:
+        primary, title_source = _auto_douban_title_candidate(
+            lib, item, fm, state, cache_path
+        )
+    base_queries = [
+        (fm.get("originalTitle"), "existing_original_title"),
+        (primary, title_source),
+        (item.get("title"), "note_title"),
+        *[(alias, "stored_alias") for alias in item.get("aliases", [])],
+    ]
+    queries = []
+    metacritic_hint = resolve_metacritic_title(str(item.get("title") or ""))
+    if metacritic_hint:
+        queries.append((metacritic_hint, "metacritic_title_override"))
+
+    bangumi = None
+    is_anime = _auto_rating_anime(item)
+    if is_anime:
+        bangumi_key = "%s|%s|%s" % (
+            item.get("title") or primary,
+            item.get("year") or "",
+            season or "",
+        )
+        cached = state["bangumi"].get(bangumi_key)
+        bangumi = cached if isinstance(cached, dict) and cached.get("status") == "matched" else None
+        if bangumi is None:
+            bangumi = lookup_bangumi(
+                str(item.get("title") or primary),
+                item.get("year"),
+                season,
+                proxy=proxy,
+            )
+            state["bangumi"][bangumi_key] = bangumi
+            _auto_rating_write_cache(cache_path, state)
+        if (
+            bangumi.get("status") != "matched"
+            and primary
+            and primary != item.get("title")
+        ):
+            fallback = lookup_bangumi(
+                primary,
+                item.get("year"),
+                season,
+                proxy=proxy,
+            )
+            if fallback.get("status") == "matched":
+                bangumi = fallback
+
+        if need_external:
+            candidate = bangumi.get("candidate") or {}
+            alias_sources = _auto_rating_dedupe(
+                (
+                    fm.get("originalTitle"),
+                    candidate.get("originalTitle"),
+                    primary,
+                    item.get("title"),
+                )
+            )
+            anime = None
+            for alias_source in alias_sources:
+                alias_query = (
+                    extract_season(alias_source)["title"]
+                    if season is not None
+                    else alias_source
+                )
+                alias_key = "%s|%s|%s" % (
+                    alias_query,
+                    item.get("year") or "",
+                    "",
+                )
+                cached_alias = state["anilist"].get(alias_key)
+                current = (
+                    cached_alias
+                    if isinstance(cached_alias, dict)
+                    and cached_alias.get("status") == "matched"
+                    else None
+                )
+                if current is None:
+                    current = lookup_anime_aliases(
+                        alias_query,
+                        item.get("year"),
+                        None,
+                        proxy=proxy,
+                    )
+                    state["anilist"][alias_key] = current
+                    _auto_rating_write_cache(cache_path, state)
+                if current.get("status") == "matched":
+                    anime = current
+                    break
+            if anime:
+                latin_aliases = [
+                    alias for alias in anime.get("aliases", [])
+                    if any(char.isalpha() and ord(char) < 128 for char in alias)
+                ][:2]
+                for alias in latin_aliases:
+                    alias_season = extract_season(alias)["season"]
+                    queries.append((
+                        alias
+                        if season is None or alias_season == season
+                        else "%s Season %d" % (alias, season),
+                        "anilist_alias",
+                    ))
+            queries.extend([
+                (candidate.get("originalTitle"), "bangumi_original_title"),
+                (primary, title_source),
+                (item.get("title"), "note_title"),
+            ])
+    elif need_external:
+        queries.extend(base_queries)
+
+    if item.get("type") == "movie" and need_external:
+        parent_aliases = _auto_movie_title_aliases(
+            item, state, cache_path, proxy
+        )
+        queries = [
+            (alias, "parent_series_movie_alias")
+            for alias in parent_aliases
+        ] + queries
+
+    normalized = []
+    seen = set()
+    for query, source in queries:
+        text = str(query or "").strip()
+        if not text:
+            continue
+        parsed = extract_season(text)
+        base = parsed["title"] if season is not None else text
+        key = (str(base).strip().casefold(), str(source or ""))
+        if not key[0] or key in seen:
+            continue
+        seen.add(key)
+        normalized.append((str(base).strip(), source))
+    return normalized[:3], bangumi
+
+
+def _auto_wikidata_scores(
+    item: dict,
+    queries: list[tuple[str, str]],
+    state: dict,
+    cache_path: Path,
+    proxy: str | None,
+    season: int | None,
+    part: int | None,
+    fields: set[str],
+) -> dict:
+    for query, source in queries[:3]:
+        cache_key = (
+            "%s|%s|%s" % (
+                item.get("type") or "",
+                item.get("year") or "",
+                query.casefold(),
+            )
+            if season is None and part is None
+            else "season-v2|%s|%s|%s|%s|%s" % (
+                item.get("type") or "",
+                item.get("year") or "",
+                season or "",
+                part or "",
+                query.casefold(),
+            )
+        )
+        result = state["wikidata"].get(cache_key)
+        if not isinstance(result, dict) or result.get("status") != "matched":
+            result = lookup_wikidata(
+                query,
+                str(item.get("type") or ""),
+                item.get("year"),
+                proxy=proxy,
+            )
+            if result.get("status") == "matched":
+                result = {
+                    **result,
+                    "query": query,
+                    "source": source,
+                    "scores": lookup_external_ids(
+                        result["candidate"],
+                        season=season,
+                        part=part,
+                        year=item.get("year"),
+                        fields=fields,
+                    ),
+                }
+            state["wikidata"][cache_key] = result
+            _auto_rating_write_cache(cache_path, state)
+        else:
+            candidate = dict(result.get("candidate") or {})
+            if (
+                "metacriticScore" in fields
+                and not candidate.get("metacriticId")
+                and candidate.get("wikidataId")
+            ):
+                refreshed = lookup_wikidata_by_id(
+                    candidate["wikidataId"],
+                    str(item.get("type") or ""),
+                    proxy=proxy,
+                )
+                if refreshed.get("status") == "matched":
+                    candidate.update(refreshed.get("candidate") or {})
+            missing = {
+                field for field in fields
+                if (result.get("scores") or {}).get(field) is None
+            }
+            if missing and candidate:
+                refreshed_scores = lookup_external_ids(
+                    candidate,
+                    season=season,
+                    part=part,
+                    year=item.get("year"),
+                    fields=missing,
+                )
+                result = {
+                    **result,
+                    "candidate": candidate,
+                    "scores": {
+                        **(result.get("scores") or {}),
+                        **{
+                            key: value
+                            for key, value in refreshed_scores.items()
+                            if key == "errors" or value is not None
+                        },
+                    },
+                }
+                state["wikidata"][cache_key] = result
+                _auto_rating_write_cache(cache_path, state)
+        if (
+            result.get("status") == "matched"
+            and any(
+                (result.get("scores") or {}).get(field) is not None
+                for field in fields
+            )
+        ):
+            return result
+    return {"status": "no_match", "reason": "NO_WIKIDATA_ID"}
+
+
+def _auto_cached_lookup(
+    scope: str,
+    cache_scope: str,
+    lookup,
+    queries: list[tuple[str, str]],
+    state: dict,
+    cache_path: Path,
+) -> dict:
+    for query, source in queries:
+        cache_key = "%s|%s|%s" % (cache_scope, query.casefold(), source)
+        result = state[scope].get(cache_key)
+        if not isinstance(result, dict) or result.get("status") != "matched":
+            result = lookup(query)
+            if result.get("status") == "matched":
+                state[scope][cache_key] = result
+                _auto_rating_write_cache(cache_path, state)
+        if result.get("status") == "matched":
+            return result
+    return {"status": "no_match", "score": None, "reason": "NO_RELIABLE_MATCH"}
+
+
 def auto_lookup_external_ratings(
     payload: dict,
     lib: "Library | None" = None,
 ) -> dict:
-    """Resolve new movie/TV ratings through the batch tool's rule engine."""
+    """Resolve rating fields directly for one newly created movie or TV item."""
     media_type = str(payload.get("type") or "").strip().lower()
     if media_type not in {"movie", "teleplay"}:
         return {}
@@ -1497,42 +1984,225 @@ def auto_lookup_external_ratings(
     target_lib = lib or LIB
     if not rel or target_lib is None:
         return {}
-    from batch_enhanced_ratings import build_plan
-
-    plan = build_plan(
-        target_lib.vault,
-        proxy=_configured_https_proxy(),
-        only_path=rel,
-        limit=1,
-        wait_seconds=0,
-        cache_path=target_lib.data_dir / "ratings-cache.json",
-    )
-    entry = next(
-        (
-            item for item in plan.get("entries", [])
-            if item.get("relativePath") == rel
-        ),
+    fresh = next(
+        (item for item in target_lib.snapshot() if item.get("path") == rel),
         None,
     )
-    if entry is None:
-        target_lib.log.event(
-            "rating_rule_no_entry",
-            level="warning",
-            path=rel,
-            planEntries=len(plan.get("entries", [])),
+    item = dict(fresh or payload)
+    item.pop("_itemPath", None)
+    fm = _auto_rating_frontmatter(target_lib, rel)
+    current = {
+        field: (
+            float(item[field])
+            if item.get(field) not in (None, "")
+            else None
         )
+        for field in (
+            "imdbScore",
+            "rottenTomatoesScore",
+            "metacriticScore",
+            "bangumiScore",
+        )
+    }
+    parsed = extract_season(str(item.get("title") or ""))
+    imdb_override = resolve_imdb_override(str(item.get("title") or ""))
+    override_season = (imdb_override or {}).get("season")
+    season = (
+        override_season
+        if override_season is not None
+        else parsed["season"]
+        if media_type == "teleplay"
+        else None
+    )
+    part = (imdb_override or {}).get("part") or parsed.get("part")
+    is_anime = _auto_rating_anime(item)
+    need_imdb = current["imdbScore"] is None or season is not None
+    need_rt = current["rottenTomatoesScore"] is None or season is not None
+    need_metacritic = current["metacriticScore"] is None
+    need_bangumi = is_anime and current["bangumiScore"] is None
+    missing = {
+        field
+        for field, needed in (
+            ("imdbScore", need_imdb),
+            ("rottenTomatoesScore", need_rt),
+            ("metacriticScore", need_metacritic),
+            ("bangumiScore", need_bangumi),
+        )
+        if needed
+    }
+    if not missing:
         return {}
-    if not entry.get("updates"):
+
+    proxy = _configured_https_proxy()
+    cache_path = target_lib.data_dir / "ratings-cache.json"
+    with _AUTO_RATING_CACHE_LOCK:
+        state = _auto_rating_cache_state(cache_path)
+        external_missing = missing & {
+            "imdbScore", "rottenTomatoesScore", "metacriticScore"
+        }
+        queries, bangumi = _auto_rating_queries(
+            target_lib,
+            item,
+            fm,
+            state,
+            cache_path,
+            proxy,
+            season,
+            1 if external_missing else 0,
+        )
+        entity = (
+            _auto_wikidata_scores(
+                item,
+                queries,
+                state,
+                cache_path,
+                proxy,
+                season,
+                part,
+                external_missing,
+            )
+            if external_missing
+            else {"status": "preserved", "scores": {}}
+        )
+        entity_scores = entity.get("scores") or {}
+        entity_title = str(
+            (entity.get("candidate") or {}).get("englishTitle") or ""
+        ).strip()
+        if entity_title:
+            queries = [(entity_title, "wikidata_english_title")] + queries
+
+        updates = {}
+        imdb_lookup = {"status": "preserved", "score": current["imdbScore"]}
+        rotten_lookup = {
+            "status": "preserved",
+            "score": current["rottenTomatoesScore"],
+        }
+        metacritic_lookup = {
+            "status": "preserved",
+            "score": current["metacriticScore"],
+        }
+        lookup_scope = "%s|%s|%s|%s" % (
+            media_type,
+            item.get("year") or "",
+            season or "",
+            part or "",
+        )
+        if "imdbScore" in missing:
+            if imdb_override:
+                imdb_lookup = lookup_imdb_by_id(
+                    imdb_override["imdbId"],
+                    media_type,
+                    item.get("year"),
+                    season=season,
+                    part=part,
+                    allow_type_mismatch=bool(
+                        imdb_override.get("allowTypeMismatch")
+                    ),
+                )
+            elif entity_scores.get("imdbScore") is not None:
+                imdb_lookup = {
+                    "status": "matched",
+                    "score": entity_scores["imdbScore"],
+                    "source": "wikidata_imdb_id",
+                }
+            else:
+                imdb_lookup = _auto_cached_lookup(
+                    "imdb",
+                    lookup_scope,
+                    lambda query: lookup_imdb(
+                        query,
+                        media_type,
+                        item.get("year"),
+                        season=season,
+                        part=part,
+                    ),
+                    queries,
+                    state,
+                    cache_path,
+                )
+            if (
+                imdb_lookup.get("status") == "matched"
+                and imdb_lookup.get("score") is not None
+            ):
+                updates["imdbScore"] = imdb_lookup["score"]
+
+        if "rottenTomatoesScore" in missing:
+            if entity_scores.get("rottenTomatoesScore") is not None:
+                rotten_lookup = {
+                    "status": "matched",
+                    "score": entity_scores["rottenTomatoesScore"],
+                    "source": "wikidata_rt_id",
+                }
+            else:
+                rotten_lookup = _auto_cached_lookup(
+                    "rotten",
+                    lookup_scope,
+                    lambda query: (
+                        lookup_rotten_tomatoes_season(
+                            query, season, item.get("year")
+                        )
+                        if season is not None
+                        else lookup_rotten_tomatoes(
+                            query, media_type, item.get("year")
+                        )
+                    ),
+                    queries,
+                    state,
+                    cache_path,
+                )
+            if (
+                rotten_lookup.get("status") == "matched"
+                and rotten_lookup.get("score") is not None
+            ):
+                updates["rottenTomatoesScore"] = rotten_lookup["score"]
+
+        if "metacriticScore" in missing:
+            if entity_scores.get("metacriticScore") is not None:
+                metacritic_lookup = {
+                    "status": "matched",
+                    "score": entity_scores["metacriticScore"],
+                    "source": "wikidata_metacritic_id",
+                }
+            else:
+                metacritic_lookup = _auto_cached_lookup(
+                    "metacritic",
+                    lookup_scope,
+                    lambda query: lookup_metacritic(
+                        query,
+                        media_type,
+                        item.get("year"),
+                        season=season,
+                        part=part,
+                    ),
+                    queries,
+                    state,
+                    cache_path,
+                )
+            if (
+                metacritic_lookup.get("status") == "matched"
+                and metacritic_lookup.get("score") is not None
+            ):
+                updates["metacriticScore"] = metacritic_lookup["score"]
+
+        if (
+            "bangumiScore" in missing
+            and isinstance(bangumi, dict)
+            and bangumi.get("status") == "matched"
+            and bangumi.get("score") is not None
+        ):
+            updates["bangumiScore"] = bangumi["score"]
+
+    if not updates:
         target_lib.log.event(
             "rating_rule_no_update",
             level="warning",
             path=rel,
-            imdbStatus=(entry.get("imdbLookup") or {}).get("status"),
-            rottenStatus=(entry.get("rottenLookup") or {}).get("status"),
-            metacriticStatus=(entry.get("metacriticLookup") or {}).get("status"),
-            bangumiStatus=(entry.get("bangumiLookup") or {}).get("status"),
+            imdbStatus=imdb_lookup.get("status"),
+            rottenStatus=rotten_lookup.get("status"),
+            metacriticStatus=metacritic_lookup.get("status"),
+            bangumiStatus=(bangumi or {}).get("status"),
         )
-    return dict((entry or {}).get("updates") or {})
+    return updates
 
 
 def _missing_external_fields(item: dict) -> list[str]:
@@ -1622,8 +2292,14 @@ def _process_rating_job(lib: "Library", job: dict) -> None:
             level="warning",
             path=rel,
             status=exc.status,
+            retryInSeconds=int(ACCESS_RESTRICTION_COOLDOWN_SECONDS),
         )
-        RATING_QUEUE.finish(rel, "blocked", error="ACCESS_RESTRICTED")
+        RATING_QUEUE.finish(
+            rel,
+            "retry",
+            error="ACCESS_RESTRICTED",
+            next_attempt=time.time() + ACCESS_RESTRICTION_COOLDOWN_SECONDS,
+        )
         return
     current = item
     if updates:
@@ -1710,6 +2386,11 @@ def start_rating_worker(lib: "Library") -> None:
     if _RATING_WORKER_THREAD is not None and _RATING_WORKER_THREAD.is_alive():
         return
     RATING_QUEUE = RatingJobQueue(lib.data_dir)
+    # Older versions left access-restriction tasks blocked forever. Resume
+    # them automatically after an upgrade or the next application start.
+    for job in RATING_QUEUE.snapshot().get("jobs", []):
+        if job.get("status") == "blocked":
+            RATING_QUEUE.retry(str(job.get("path") or ""))
     _RATING_WORKER_STOP.clear()
     _RATING_WORKER_WAKE.clear()
     _RATING_WORKER_THREAD = threading.Thread(
@@ -3000,6 +3681,7 @@ def lookup_rotten_tomatoes_season(
 
 IMDB_SUGGESTION_URL = "https://v3.sg.media-imdb.com/suggestion/x/%s.json"
 IMDB_GRAPHQL_URL = "https://api.graphql.imdb.com/"
+IMDB_POPULARITY_DOMINANCE_RATIO = 5.0
 
 
 def _imdb_suggestion_json(title: str) -> dict:
@@ -3187,6 +3869,7 @@ def lookup_imdb(
             "year": detail_year,
             "type": detail_type,
             "score": score,
+            "popularityRank": hit.get("rank"),
             "url": "https://www.imdb.com/title/%s/" % hit["id"],
         })
     if len(verified) == 1:
@@ -3196,6 +3879,25 @@ def lookup_imdb(
             "candidate": verified[0],
         }
     if len(verified) > 1:
+        ranked = []
+        for candidate in verified:
+            rank = candidate.get("popularityRank")
+            if isinstance(rank, bool) or not isinstance(rank, (int, float)):
+                break
+            if rank <= 0:
+                break
+            ranked.append((float(rank), candidate))
+        if len(ranked) == len(verified):
+            ranked.sort(key=lambda pair: pair[0])
+            best_rank, best = ranked[0]
+            second_rank = ranked[1][0]
+            if second_rank >= best_rank * IMDB_POPULARITY_DOMINANCE_RATIO:
+                return {
+                    "status": "matched",
+                    "score": best["score"],
+                    "candidate": best,
+                    "matchMode": "popularity_rank",
+                }
         return {
             "status": "ambiguous",
             "score": None,

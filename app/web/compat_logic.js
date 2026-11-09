@@ -85,7 +85,8 @@
       .normalize("NFKC")
       .split(/[\/|｜／]/, 1)[0]
       .trim();
-    let title = raw.split(/\s*[:：]\s*/, 1)[0].trim() || raw;
+    const groupTitle = raw.split(/\s*[:：]\s*/, 1)[0].trim() || raw;
+    let title = groupTitle;
     title = title.replace(/\s*第[零〇一二三四五六七八九十百\d]+[季期].*$/, "");
     title = title.replace(/\s*(?:Season\s*\d+|S\d+)\b.*$/i, "");
     title = title.replace(/[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]/g, "");
@@ -94,7 +95,7 @@
     title = title.replace(/\s*(?:复刻版|重制版|重置版|皇家版|终极版|完全版|决定版|导演剪辑版|導演剪輯版|特别版|特別版|周年纪念版|高清版|豪华版|豪華版|黄金版|年度版|试玩版|重制|复刻)$/i, "");
     title = title.replace(/\s*\d+$/, "");
     title = title.replace(/\s*(?:[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]+|[IVX]+)$/, "");
-    return title.trim() || raw;
+    return title.trim() || groupTitle;
   }
 
   return {

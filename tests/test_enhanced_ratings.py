@@ -599,7 +599,127 @@ class BangumiAndAliasTests(unittest.TestCase):
         self.assertEqual(updated["rottenTomatoesScore"], 93)
         self.assertEqual(updated["metacriticScore"], 90)
 
-    def test_auto_ratings_use_the_same_results_as_batch_tool(self):
+    def test_automatic_ratings_run_directly_and_fetch_douban_original_title(self):
+        with tempfile.TemporaryDirectory() as temp:
+            vault = Path(temp)
+            (vault / "02-电影阅读" / "movie").mkdir(parents=True)
+            (vault / "attachments").mkdir()
+            rel = "02-电影阅读/movie/本地化标题.md"
+            note = vault / rel
+            note.write_text(
+                "---\n"
+                "id: 1234567\n"
+                "title: 本地化标题\n"
+                "type: movie\n"
+                "datePublished: 2006-11-17\n"
+                "status: false\n"
+                "doubanScore: 7.8\n"
+                "---\n",
+                encoding="utf-8",
+            )
+            lib = server.Library(vault)
+            with (
+                mock.patch.object(
+                    server,
+                    "fetch_douban_detail",
+                    return_value={"originalTitle": "English Release"},
+                ) as detail,
+                mock.patch.object(server, "search_douban") as search,
+                mock.patch.object(
+                    server,
+                    "lookup_wikidata",
+                    return_value={"status": "no_match"},
+                ),
+                mock.patch.object(
+                    server,
+                    "lookup_imdb",
+                    return_value={"status": "matched", "score": 8.0},
+                ),
+                mock.patch.object(
+                    server,
+                    "lookup_rotten_tomatoes",
+                    return_value={"status": "matched", "score": 94},
+                ),
+                mock.patch.object(
+                    server,
+                    "lookup_metacritic",
+                    return_value={"status": "matched", "score": 80},
+                ),
+                mock.patch.object(
+                    batch,
+                    "build_plan",
+                    side_effect=AssertionError("batch tool must not be called"),
+                ) as build_plan,
+            ):
+                result = server.auto_lookup_external_ratings(
+                    {
+                        "_itemPath": rel,
+                        "type": "movie",
+                    },
+                    lib=lib,
+                )
+        self.assertEqual(result, {
+            "imdbScore": 8.0,
+            "rottenTomatoesScore": 94,
+            "metacriticScore": 80,
+        })
+        detail.assert_called()
+        search.assert_not_called()
+        build_plan.assert_not_called()
+
+    def test_access_restriction_requeues_automatically(self):
+        with tempfile.TemporaryDirectory() as temp:
+            vault = Path(temp)
+            (vault / "02-电影阅读" / "movie").mkdir(parents=True)
+            (vault / "attachments").mkdir()
+            lib = server.Library(vault)
+            created = server.create_note(lib, {
+                "type": "movie",
+                "title": "重试测试",
+                "status": False,
+            })
+            queue = mock.Mock()
+            server.RATING_QUEUE = queue
+            with mock.patch.object(
+                server,
+                "auto_lookup_external_ratings",
+                side_effect=server.UpstreamAccessRestricted("example.test", 429),
+            ):
+                server._process_rating_job(lib, {
+                    "path": created["path"],
+                    "fields": [
+                        "imdbScore",
+                        "metacriticScore",
+                        "rottenTomatoesScore",
+                    ],
+                    "attempts": 0,
+                })
+        args = queue.finish.call_args
+        self.assertEqual(args.args[1], "retry")
+        self.assertEqual(args.kwargs["error"], "ACCESS_RESTRICTED")
+        self.assertGreater(args.kwargs["next_attempt"], time.time())
+
+    def test_worker_start_resumes_legacy_blocked_jobs(self):
+        with tempfile.TemporaryDirectory() as temp:
+            lib = server.Library(Path(temp))
+            queue = server.RatingJobQueue(lib.data_dir)
+            path = "02-电影阅读/movie/旧任务.md"
+            queue.enqueue(path, ["imdbScore"])
+            queue.due(now=time.time() + 1)
+            queue.finish(path, "blocked", error="ACCESS_RESTRICTED")
+            fake_thread = mock.Mock()
+            with (
+                mock.patch.object(server.threading, "Thread", return_value=fake_thread),
+                mock.patch.object(server, "_RATING_WORKER_THREAD", None),
+            ):
+                server.start_rating_worker(lib)
+            job = server.RATING_QUEUE.snapshot(path)["jobs"][0]
+        server._RATING_WORKER_THREAD = None
+        self.assertEqual(job["status"], "queued")
+        self.assertIsNone(job["lastError"])
+        fake_thread.start.assert_called_once()
+
+    def test_automatic_and_batch_rules_agree_on_verified_imdb_overrides(self):
         cases = (
             (
                 "无职转生Ⅱ到了异世界就拿出真本事Part.1",
@@ -637,6 +757,36 @@ class BangumiAndAliasTests(unittest.TestCase):
                     "status": False,
                 })
                 with (
+                    mock.patch.object(
+                        server,
+                        "lookup_imdb_by_id",
+                        return_value={"status": "matched", "score": score},
+                    ) as imdb_by_id,
+                    mock.patch.object(
+                        server,
+                        "lookup_wikidata",
+                        return_value={"status": "no_match"},
+                    ),
+                    mock.patch.object(
+                        server,
+                        "lookup_rotten_tomatoes_season",
+                        return_value={"status": "no_match", "score": None},
+                    ),
+                    mock.patch.object(
+                        server,
+                        "lookup_metacritic",
+                        return_value={"status": "no_match", "score": None},
+                    ),
+                    mock.patch.object(
+                        server,
+                        "lookup_bangumi",
+                        return_value={"status": "no_match", "score": None},
+                    ),
+                    mock.patch.object(
+                        server,
+                        "lookup_anime_aliases",
+                        return_value={"status": "no_match", "aliases": []},
+                    ),
                     mock.patch.object(
                         batch,
                         "lookup_imdb_by_id",
